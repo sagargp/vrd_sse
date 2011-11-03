@@ -22,166 +22,176 @@ using namespace std;
 #define NUM_RIDGE_DIRECTIONS	NUM_GRADIENT_DIRECTIONS/2
 #define BOUNDARY_STEP_SIZE		NUM_GRADIENT_DIRECTIONS
 
-Image<PixLAB<float>> blurredVariance_SSE(Image<PixLAB<float>> const lab, int const r)
+/********************
+ * SSE code
+ ********************/
 {
-	NRT_INFO("Starting SSE blur r=" << r);
-	int boxSize = pow(2*r+1, 2);
-	int w = lab.width();
-	int h = lab.height();
-
-	Image<PixLAB<float>> output(w, h, ImageInitPolicy::None);
-	
-	float const * const labbegin = lab.pod_begin();
-	
-	__m128 _boxsize = _mm_set_ps1(boxSize);
-	__m128 _result = _mm_setzero_ps();
-
-	for (int y = 0; y < h; y++)
+	Image<PixLAB<float>> blurredVariance_SSE(Image<PixLAB<float>> const lab, int const r)
 	{
-		for (int x = 0; x < w; x++)
-		{
-			__m128 _sum = _mm_setzero_ps();
+		NRT_INFO("Starting SSE blur r=" << r);
+		int boxSize = pow(2*r+1, 2);
+		int w = lab.width();
+		int h = lab.height();
 
-			int ytop = max(y-r, 0);
-			int ybot = min(y+r, h-1);
-			int xlef = max(x-r, 0);
-			int xrig = min(x+r, w-1);
+		Image<PixLAB<float>> output(w, h, ImageInitPolicy::None);
 		
-			for (int j = ytop; j <= ybot; j++)
-			{
-				for (int i = xlef; i <= xrig; i++)
-				{
-					// warning:
-					// at the last pixel, this could try to load 4 bytes of memory we don't own
-					float const * const pixbegin = &labbegin[(j*w+i)*3];
-
-					__m128 _curpix = _mm_loadu_ps(pixbegin);
-					_sum = _mm_add_ps(_curpix, _sum);
-				}
-			}
-			_result = _mm_div_ps(_sum, _boxsize);
-			
-			float local_result[4];
-			_mm_storeu_ps(local_result, _result);
-
-			float l = local_result[0];
-			float a = local_result[1];
-			float b = local_result[2];
-
-			output(x, y) = PixLAB<float>(l, a, b);
-		}
-	}
-	NRT_INFO("Finished SSE blur");
-	return output;
-}
-
-Image<PixGray<float>> magnitudeLAB_SSE(Image<PixLAB<float>> lab)
-{
-	int w = lab.width();
-	int h = lab.height();
-	Image<PixGray<float>> output(w, h);
-
-	float const * labbegin = lab.pod_begin();
-
-	for (int y = 0; y < lab.height(); y++)
-	{
-		for (int x = 0; x < lab.width(); x++)
-		{
-			__m128 _channels = _mm_loadu_ps(labbegin); // _channels = [l, a, b]
-			_channels = _mm_mul_ps(_channels, _channels); // _channels = [l^2, a^2, b^2]
-
-			__m128i _sum = (__m128i) _channels;	
-			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 1));
-			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 2));
-			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 4));
-			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 8));
-			
-			__m128 _sq = _mm_sqrt_ps( (__m128)_sum );
-			output(x, y) = _mm_cvtsi128_si32( (__m128i)_sq );
-
-			labbegin += 3;
-		}
-	}
-	return output;
-}
-
-Image<PixLAB<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
-{
-	NRT_INFO("Starting Blur r=" << r);
-	int boxSize = pow(2*r + 1, 2);
-	int w = lab.width();
-	int h = lab.height();
-
-	Image<PixLAB<float>> output(w, h, ImageInitPolicy::None);
-
-	float const * const labbegin = lab.pod_begin();
-
-	for (int y = 0; y < h; y++)
-	{
-		for (int x = 0; x < w; x++)
-		{
-			float sqsum_r, sqsum_g, sqsum_b;
-			float sum_r, sum_g, sum_b;
-
-			sqsum_r = sum_r = 0;
-			sqsum_g = sum_g = 0;
-			sqsum_b = sum_b = 0;
-
-			int ytop = max(y-r, 0);
-			int ybot = min(y+r, h-1);
-			int xlef = max(x-r, 0);
-			int xrig = min(x+r, w-1);
-
-			for (int j = ytop; j <= ybot; j++)
-			{
-				for (int i = xlef; i <= xrig; i++)
-				{
-					float const * const pixbegin = &labbegin[(j*w + i)*3];
-					float const r = pixbegin[0];
-					float const g = pixbegin[1];
-					float const b = pixbegin[2];
-
-					sum_r += r;
-					sum_g += g;
-					sum_b += b;
-				}
-			}
-			float r = sum_r/boxSize;
-			float g = sum_g/boxSize;
-			float b = sum_b/boxSize;
+		float const * const labbegin = lab.pod_begin();
 		
-			output(x,y) = PixLAB<float>(r,g,b);
+		__m128 _boxsize = _mm_set_ps1(boxSize);
+		__m128 _result = _mm_setzero_ps();
+
+		for (int y = 0; y < h; y++)
+		{
+			for (int x = 0; x < w; x++)
+			{
+				__m128 _sum = _mm_setzero_ps();
+
+				int ytop = max(y-r, 0);
+				int ybot = min(y+r, h-1);
+				int xlef = max(x-r, 0);
+				int xrig = min(x+r, w-1);
+			
+				for (int j = ytop; j <= ybot; j++)
+				{
+					for (int i = xlef; i <= xrig; i++)
+					{
+						// warning:
+						// at the last pixel, this could try to load 4 bytes of memory we don't own
+						float const * const pixbegin = &labbegin[(j*w+i)*3];
+
+						__m128 _curpix = _mm_loadu_ps(pixbegin);
+						_sum = _mm_add_ps(_curpix, _sum);
+					}
+				}
+				_result = _mm_div_ps(_sum, _boxsize);
+				
+				float local_result[4];
+				_mm_storeu_ps(local_result, _result);
+
+				float l = local_result[0];
+				float a = local_result[1];
+				float b = local_result[2];
+
+				output(x, y) = PixLAB<float>(l, a, b);
+			}
 		}
+		NRT_INFO("Finished SSE blur");
+		return output;
 	}
 
-	NRT_INFO("Finished blur");
-	return output;
-}
+	Image<PixGray<float>> magnitudeLAB_SSE(Image<PixLAB<float>> lab)
+	{
+		int w = lab.width();
+		int h = lab.height();
+		Image<PixGray<float>> output(w, h);
 
-Image<PixGray<float>> magnitudeLAB(Image<PixLAB<float>> lab)
-{
-	int w = lab.width();
-	int h = lab.height();
-	Image<PixGray<float>> output(w, h);
-	
-	for (int x = 0; x < lab.width(); x++)
+		float const * labbegin = lab.pod_begin();
+
 		for (int y = 0; y < lab.height(); y++)
-			output(x, y) = sqrt(pow(lab(x, y).l(), 2)
-							  + pow(lab(x, y).a(), 2)
-							  + pow(lab(x, y).b(), 2));
-	return output;
+		{
+			for (int x = 0; x < lab.width(); x++)
+			{
+				__m128 _channels = _mm_loadu_ps(labbegin); // _channels = [l, a, b]
+				_channels = _mm_mul_ps(_channels, _channels); // _channels = [l^2, a^2, b^2]
+
+				__m128i _sum = (__m128i) _channels;	
+				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 1));
+				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 2));
+				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 4));
+				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 8));
+				
+				__m128 _sq = _mm_sqrt_ps( (__m128)_sum );
+				output(x, y) = _mm_cvtsi128_si32( (__m128i)_sq );
+
+				labbegin += 3;
+			}
+		}
+		return output;
+	}
+
+	Image<PixGray<float>> standardDeviationLAB_SSE(Image<PixLAB<float>> lab, int const r)
+	{
+		Image<PixLAB<float>> blurred(blurredVariance_SSE(lab, r));
+		return magnitudeLAB_SSE(blurred);
+	}
 }
 
-Image<PixGray<float>> standardDeviationLAB_SSE(Image<PixLAB<float>> lab, int const r)
+/********************
+ * Non-SSE code
+ ********************/
 {
-	Image<PixLAB<float>> blurred(blurredVariance_SSE(lab, r));
-	return magnitudeLAB_SSE(blurred);
-}
+	Image<PixLAB<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
+	{
+		NRT_INFO("Starting Blur r=" << r);
+		int boxSize = pow(2*r + 1, 2);
+		int w = lab.width();
+		int h = lab.height();
 
-Image<PixGray<float>> standardDeviationLAB(Image<PixLAB<float>> lab, int const r)
-{
-	Image<PixLAB<float>> blurred(blurredVariance(lab, r));
-	return magnitudeLAB(blurred);
+		Image<PixLAB<float>> output(w, h, ImageInitPolicy::None);
+
+		float const * const labbegin = lab.pod_begin();
+
+		for (int y = 0; y < h; y++)
+		{
+			for (int x = 0; x < w; x++)
+			{
+				float sqsum_r, sqsum_g, sqsum_b;
+				float sum_r, sum_g, sum_b;
+
+				sqsum_r = sum_r = 0;
+				sqsum_g = sum_g = 0;
+				sqsum_b = sum_b = 0;
+
+				int ytop = max(y-r, 0);
+				int ybot = min(y+r, h-1);
+				int xlef = max(x-r, 0);
+				int xrig = min(x+r, w-1);
+
+				for (int j = ytop; j <= ybot; j++)
+				{
+					for (int i = xlef; i <= xrig; i++)
+					{
+						float const * const pixbegin = &labbegin[(j*w + i)*3];
+						float const r = pixbegin[0];
+						float const g = pixbegin[1];
+						float const b = pixbegin[2];
+
+						sum_r += r;
+						sum_g += g;
+						sum_b += b;
+					}
+				}
+				float r = sum_r/boxSize;
+				float g = sum_g/boxSize;
+				float b = sum_b/boxSize;
+			
+				output(x,y) = PixLAB<float>(r,g,b);
+			}
+		}
+
+		NRT_INFO("Finished blur");
+		return output;
+	}
+
+	Image<PixGray<float>> magnitudeLAB(Image<PixLAB<float>> lab)
+	{
+		int w = lab.width();
+		int h = lab.height();
+		Image<PixGray<float>> output(w, h);
+		
+		for (int x = 0; x < lab.width(); x++)
+			for (int y = 0; y < lab.height(); y++)
+				output(x, y) = sqrt(pow(lab(x, y).l(), 2)
+								  + pow(lab(x, y).a(), 2)
+								  + pow(lab(x, y).b(), 2));
+		return output;
+	}
+
+	Image<PixGray<float>> standardDeviationLAB(Image<PixLAB<float>> lab, int const r)
+	{
+		Image<PixLAB<float>> blurred(blurredVariance(lab, r));
+		return magnitudeLAB(blurred);
+	}
 }
 
 int main(int argc, const char** argv)
