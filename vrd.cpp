@@ -81,30 +81,21 @@ using namespace std;
 
 	Image<PixGray<float>> magnitudeLAB_SSE(Image<PixLAB<float>> lab)
 	{
-		int w = lab.width();
-		int h = lab.height();
-		Image<PixGray<float>> output(w, h);
+		Image<PixGray<float>> output(lab.dims());
 
-		float const * labbegin = lab.pod_begin();
-
-		for (int y = 0; y < lab.height(); y++)
+		for ( float const * labbegin = lab.pod_begin(); labbegin != lab.pod_end(); labbegin += 3)
 		{
-			for (int x = 0; x < lab.width(); x++)
-			{
-				__m128 _channels = _mm_loadu_ps(labbegin); // _channels = [l, a, b]
-				_channels = _mm_mul_ps(_channels, _channels); // _channels = [l^2, a^2, b^2]
+			__m128 _channels = _mm_loadu_ps(labbegin); // _channels = [l, a, b]
+			_channels = _mm_mul_ps(_channels, _channels); // _channels = [l^2, a^2, b^2]
 
-				__m128i _sum = (__m128i) _channels;	
-				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 1));
-				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 2));
-				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 4));
-				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 8));
-				
-				__m128 _sq = _mm_sqrt_ps( (__m128)_sum );
-				output(x, y) = _mm_cvtsi128_si32( (__m128i)_sq );
-
-				labbegin += 3;
-			}
+			__m128i _sum = (__m128i) _channels;	
+			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 1));
+			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 2));
+			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 4));
+			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 8));
+			
+			__m128 _sq = _mm_sqrt_ps( (__m128)_sum );
+			output(x, y) = _mm_cvtsi128_si32( (__m128i)_sq );
 		}
 		return output;
 	}
