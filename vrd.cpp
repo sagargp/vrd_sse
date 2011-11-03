@@ -25,7 +25,7 @@ using namespace std;
 /********************
  * SSE code
  ********************/
-{
+namespace {
 	Image<PixLAB<float>> blurredVariance_SSE(Image<PixLAB<float>> const lab, int const r)
 	{
 		NRT_INFO("Starting SSE blur r=" << r);
@@ -79,6 +79,16 @@ using namespace std;
 		return output;
 	}
 
+	void _print_reg(__m128 *r)
+	{
+		float result[4];
+		_mm_storeu_ps(result, *r);
+
+		for (int i = 0; i < 4; i++)
+			cout << result[i] << endl;
+		cout << endl;
+	}
+
 	Image<PixGray<float>> magnitudeLAB_SSE(Image<PixLAB<float>> lab)
 	{
 		int w = lab.width();
@@ -86,23 +96,27 @@ using namespace std;
 		Image<PixGray<float>> output(w, h);
 
 		float const * labbegin = lab.pod_begin();
-
+		float result[4];
+		
 		for (int y = 0; y < lab.height(); y++)
 		{
 			for (int x = 0; x < lab.width(); x++)
 			{
-				__m128 _channels = _mm_loadu_ps(labbegin); // _channels = [l, a, b]
-				_channels = _mm_mul_ps(_channels, _channels); // _channels = [l^2, a^2, b^2]
+				__m128 _sum = _mm_loadu_ps(labbegin);
+			
+				_sum = _mm_mul_ps(_sum, _sum);
 
-				__m128i _sum = (__m128i) _channels;	
-				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 1));
-				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 2));
-				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 4));
-				_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 8));
+				__m128 _sum1 = (__m128)_mm_srli_si128(_sum, 4);
+				__m128 _sum2 = (__m128)_mm_srli_si128(_sum, 8);
+
+				__m128 _sum3 = _mm_add_ps(_sum, _sum1);
+				__m128 _sum4 = _mm_add_ps(_sum3, _sum2);
+
+				__m128 _sq = _mm_sqrt_ps(_sum4);
 				
-				__m128 _sq = _mm_sqrt_ps( (__m128)_sum );
-				output(x, y) = _mm_cvtsi128_si32( (__m128i)_sq );
-
+				_mm_storeu_ps(result, _sq);
+				output(x, y) = result[0];
+				
 				labbegin += 3;
 			}
 		}
@@ -119,7 +133,7 @@ using namespace std;
 /********************
  * Non-SSE code
  ********************/
-{
+namespace {
 	Image<PixLAB<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
 	{
 		NRT_INFO("Starting Blur r=" << r);
@@ -222,31 +236,33 @@ int main(int argc, const char** argv)
 	Image<PixRGB<float>> input = readImage(imageName.getVal()).convertTo<PixRGB<float>>();
 	Image<PixLAB<float>> lab(input);
 	
-	timer.begin();
-	Image<PixGray<float>> std(standardDeviationLAB(lab, 5));
-	timer.end();
-	NRT_INFO("normal blur: " << timer.report());
-	
-	timer.reset();
-
-	timer.begin();
-	Image<PixGray<float>> std_sse(standardDeviationLAB_SSE(lab, 5));
-	timer.end();
-	NRT_INFO("SSE blur: " << timer.report());
-	
-	Image<PixRGB<float>> output(std);
-
 	mySink->out(GenericImage(input), "Original RGB image");
-	mySink->out(GenericImage(output), "Output image");
-
-	//Image<PixLAB<float>> blurredLAB(blurredVariance(convertedLAB, 8));
-	//Image<PixRGB<float>> convertedRGB(convertedLAB);
-	//Image<PixRGB<float>> convertedBlurredRGB(blurredLAB);
-
-	//mySink->out(GenericImage(originalRGB), "Original RGB image");
-	//mySink->out(GenericImage(convertedRGB), "Converted RGB image");
-	//mySink->out(GenericImage(convertedBlurredRGB), "Blurred RGB image");
 	
+	/* Non-SSE */
+	{
+		timer.begin();
+		Image<PixGray<float>> std(standardDeviationLAB(lab, 5));
+		timer.end();
+	
+		NRT_INFO("normal blur: " << timer.report());
+	
+		mySink->out(GenericImage(std), "Non-SSE");
+	}
+
+	timer.reset();
+	
+	/* SSE */
+	{	
+		timer.begin();
+		Image<PixGray<float>> std_sse(standardDeviationLAB_SSE(lab, 5));
+		timer.end();
+		NRT_INFO("SSE blur: " << timer.report());
+		
+		Image<PixRGB<float>> output(std_sse);
+		mySink->out(GenericImage(std_sse), "SSE");
+	}
+
+
 	while(true)
 	{
 	}
