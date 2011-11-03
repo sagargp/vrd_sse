@@ -2,7 +2,8 @@
 #include <nrt/ImageProc/IO/ImageSink/ImageSinks.H>
 #include <nrt/ImageProc/IO/ImageSource/ImageReaders/ImageReader.H>
 #include <nrt/Core/Debugging/TimeProfiler.H>
-#include <eigen3/Eigen/Eigen>
+#include <nrt/Eigen/Eigen.H>
+#include <nrt/Eigen/EigenConversions.H>
 #include <xmmintrin.h> // sse
 #include <emmintrin.h> // sse3
 
@@ -28,7 +29,6 @@ using namespace std;
 namespace {
 	Image<PixLAB<float>> blurredVariance_SSE(Image<PixLAB<float>> const lab, int const r)
 	{
-		NRT_INFO("Starting SSE blur r=" << r);
 		int boxSize = pow(2*r+1, 2);
 		int w = lab.width();
 		int h = lab.height();
@@ -75,18 +75,7 @@ namespace {
 				output(x, y) = PixLAB<float>(l, a, b);
 			}
 		}
-		NRT_INFO("Finished SSE blur");
 		return output;
-	}
-
-	void _print_reg(__m128 *r)
-	{
-		float result[4];
-		_mm_storeu_ps(result, *r);
-
-		for (int i = 0; i < 4; i++)
-			cout << result[i] << endl;
-		cout << endl;
 	}
 
 	Image<PixGray<float>> magnitudeLAB_SSE(Image<PixLAB<float>> lab)
@@ -128,6 +117,58 @@ namespace {
 		Image<PixLAB<float>> blurred(blurredVariance_SSE(lab, r));
 		return magnitudeLAB_SSE(blurred);
 	}
+
+	vector<Image<PixGray<float>>> calculateGradient_SSE(Image<PixGray<float>> input, int const rad)
+	{
+		int w = input.width();
+		int h = input.height();
+
+		vector<Image<PixGray<float>>> gradImg(2);
+		gradImg[0] = Image<PixGray<float>>(w, h);
+		gradImg[1] = Image<PixGray<float>>(w, h);
+
+		// bbGray <-- boxBlur(input);
+		
+		Eigen::VectorXf dx = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+		Eigen::VectorXf dy = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+
+		dx = dx.array().cos();
+		dy = dy.array().sin();
+
+		float const * input_itr = input.pod_begin();
+
+		for (int i = 0; i < w; i++)
+		{
+			for (int j = 0; j < h; j++)
+			{
+				float sumX = 0.0;
+				float sumY = 0.0;
+				for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
+				{
+					int i1 = abs(i + rad*dx[k]);
+					int j1 = abs(j + rad*dy[k]);
+
+					int i2 = abs(i - rad*dx[k]);		
+					int j2 = abs(j - rad*dy[k]);
+					
+					if(i1 >= w) i1 = 2*w - 2 - i1;
+					if(j1 >= h) j1 = 2*h - 2 - j1;
+					  
+					if(i2 >= w) i2 = 2*w - 2 - i2;
+					if(j2 >= h) j2 = 2*h - 2 - j2;
+					
+					//float val = input.at(i1,j1).val() - input.at(i2,j2).val();
+					float val = &input_itr[w*i1+j1] - &input_itr[w*i2+j2];
+
+					sumX +=  val * dx[k];
+					sumY +=  val * dy[k]; 
+				}
+				gradImg[0](i, j) = sumX;
+				gradImg[1](i, j) = sumY;
+			}
+		}
+		return gradImg;
+	}
 }
 
 /********************
@@ -136,7 +177,6 @@ namespace {
 namespace {
 	Image<PixLAB<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
 	{
-		NRT_INFO("Starting Blur r=" << r);
 		int boxSize = pow(2*r + 1, 2);
 		int w = lab.width();
 		int h = lab.height();
@@ -183,7 +223,6 @@ namespace {
 			}
 		}
 
-		NRT_INFO("Finished blur");
 		return output;
 	}
 
@@ -205,6 +244,136 @@ namespace {
 	{
 		Image<PixLAB<float>> blurred(blurredVariance(lab, r));
 		return magnitudeLAB(blurred);
+	}
+
+	vector<Image<PixGray<float>>> calculateGradient(Image<PixGray<float>> gray, int const rad)
+	{
+		int w = gray.width();
+		int h = gray.height();
+
+		vector<Image<PixGray<float>>> gradImg(2);
+		gradImg[0] = Image<PixGray<float>>(w, h);
+		gradImg[1] = Image<PixGray<float>>(w, h);
+
+		// bbGray <-- boxBlur(gray);
+		
+		Eigen::VectorXf dx = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+		Eigen::VectorXf dy = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+
+		dx = dx.array().cos();
+		dy = dy.array().sin();
+
+		for (int i = 0; i < w; i++)
+		{
+			for (int j = 0; j < h; j++)
+			{
+				float sumX = 0.0;
+				float sumY = 0.0;
+				for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
+				{
+					int i1 = abs(i + rad*dx[k]);
+					int j1 = abs(j + rad*dy[k]);
+
+					int i2 = abs(i - rad*dx[k]);		
+					int j2 = abs(j - rad*dy[k]);
+					
+					if(i1 >= w) i1 = 2*w - 2 - i1;
+					if(j1 >= h) j1 = 2*h - 2 - j1;
+					  
+					if(i2 >= w) i2 = 2*w - 2 - i2;
+					if(j2 >= h) j2 = 2*h - 2 - j2;
+					
+					//float val = varBbImg.at(i1,j1).val() - varBbImg.at(i2,j2).val();
+					float val = gray.at(i1,j1).val() - gray.at(i2,j2).val();
+					
+					sumX +=  val * dx[k];
+					sumY +=  val * dy[k]; 
+				}
+				gradImg[0](i, j) = sumX;
+				gradImg[1](i, j) = sumY;
+			}
+		}
+		return gradImg;
+	}
+
+	Image<PixGray<float>> calculateRidge(vector<Image<PixGray<float>>> const &gradImg, int const rad)
+	{
+		int w = gradImg[0].width();
+		int h = gradImg[0].height();
+		
+		Image<PixGray<float>> ridgeImg(w, h);
+
+		Eigen::VectorXf dx = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS,0,(NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+		Eigen::VectorXf dy = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS,0,(NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+
+		dx = dx.array().cos();
+		dy = dy.array().sin();
+
+		std::vector<std::vector<Eigen::MatrixXf> > dVin(NUM_GRADIENT_DIRECTIONS);
+
+		// Look at neighboring pixels in a border defined by radius (rad) in the gradient image for evidence that supports the gradient orientation (k) at this pixel (i,j)
+		// Only set the pixel (dVin) if there is positive evidence (threshold at 0)
+		for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
+		{
+			dVin[k].resize(2);
+			dVin[k][0] = Eigen::MatrixXf::Zero(w, h);
+			dVin[k][1] = Eigen::MatrixXf::Zero(w, h);
+
+			for (int i = 0; i < w; i++)
+			{
+				for (int j = 0; j < h; j++)
+				{
+					int ii = abs(i + rad*dx[k]);
+					int jj = abs(j + rad*dy[k]); 
+
+					if(ii >= w) ii = 2*w - 2 - ii;
+					if(jj >= h) jj = 2*h - 2 - jj;
+					  
+					float vX = gradImg[0].at(ii,jj).val(); 
+					float vY = gradImg[1].at(ii,jj).val();
+					if((vX*dx[k] + vY*dy[k]) < 0.0)
+					{
+					  dVin[k][0](i,j) = vX;
+					  dVin[k][1](i,j) = vY;
+					}
+				}
+			}
+		}
+
+		vector<Eigen::MatrixXf> rDir(NUM_RIDGE_DIRECTIONS);
+		for(uint k = 0; k < NUM_RIDGE_DIRECTIONS; k++)
+		{
+			rDir[k].setZero(w,h); 
+
+			uint k2 = k + NUM_RIDGE_DIRECTIONS;
+
+			// Calculate the dot product between the gradient on the positive side (k) and the negative side (k2) 
+			Eigen::MatrixXf gVal = -(dVin[k][0].array()*dVin[k2][0].array() + dVin[k][1].array()*dVin[k2][1].array());
+			// rDir is set to zero, so this operation with rectify gVal at zero
+			rDir[k] = rDir[k].cwiseMax(gVal);
+			// Take square root of direction
+			rDir[k] = rDir[k].array().sqrt();    
+		}
+
+		// Next step is to find the maximum ridge response across all ridge directions
+		// To do this, we will max pairs of ridge direction matrices and merge iteratively
+		int endRes = NUM_RIDGE_DIRECTIONS;
+		while(endRes>1)
+		{
+			int leftOver = 0;
+			for(int i=0;i<endRes;i+=2)
+			{
+				if(i+1<endRes)
+					rDir[i/2] = rDir[i].cwiseMax(rDir[i+1]);
+				else
+				{
+					rDir[i/2] = rDir[i];
+					leftOver = 1;
+				}
+			}
+			endRes = (endRes >> 1) + leftOver;
+		}
+		return eigenMatrixToImage<float>(rDir[0]);
 	}
 }
 
@@ -240,26 +409,38 @@ int main(int argc, const char** argv)
 	
 	/* Non-SSE */
 	{
+		NRT_INFO("Starting non-SSE transform");
+		
 		timer.begin();
-		Image<PixGray<float>> std(standardDeviationLAB(lab, 5));
+		Image<PixGray<float>> varImg(standardDeviationLAB(lab, 5));
+		vector<Image<PixGray<float>>> gradImgs = calculateGradient(varImg, 5);
+		Image<PixGray<float>> ridgeImg(calculateRidge(gradImgs, 5));
 		timer.end();
 	
-		NRT_INFO("normal blur: " << timer.report());
-	
-		mySink->out(GenericImage(std), "Non-SSE");
+		NRT_INFO("Normal: " << timer.report());
+		
+		mySink->out(GenericImage(ridgeImg), "Non-SSE");
+
+		NRT_INFO("Done with non-SSE transform");
 	}
 
 	timer.reset();
 	
 	/* SSE */
-	{	
+	{
+		NRT_INFO("Starting SSE transform");
+
 		timer.begin();
-		Image<PixGray<float>> std_sse(standardDeviationLAB_SSE(lab, 5));
+		Image<PixGray<float>> varImg_sse(standardDeviationLAB_SSE(lab, 5));
+		vector<Image<PixGray<float>>> gradImgs_sse = calculateGradient_SSE(varImg_sse, 5);
+		Image<PixGray<float>> ridgeImg_sse(calculateRidge(gradImgs_sse, 5));
 		timer.end();
-		NRT_INFO("SSE blur: " << timer.report());
 		
-		Image<PixRGB<float>> output(std_sse);
-		mySink->out(GenericImage(std_sse), "SSE");
+		NRT_INFO("SSE: " << timer.report());
+		
+		mySink->out(GenericImage(ridgeImg_sse), "SSE");
+
+		NRT_INFO("Done with SSE transform");
 	}
 
 
