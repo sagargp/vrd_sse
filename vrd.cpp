@@ -91,18 +91,38 @@ namespace {
 		{
 			for (int x = 0; x < lab.width(); x++)
 			{
+				//												 LSB		 MSB
+				// load the first 4 floats from labbegin: _sum = {f1, f2, f3, f4}
+				// (note f4 is the first channel of the next pixel; so we don't care about it for this iteration
 				__m128 _sum = _mm_loadu_ps(labbegin);
 			
+				// square each of them: {f1=f1^2, f2=f2^2, ...}
 				_sum = _mm_mul_ps(_sum, _sum);
 
+				// shift _sum right (toward the LSB):
+				// _sum1 = {f2, f3, f4, 00}
+				// _sum2 = {f3, f4, 00, 00}
 				__m128 _sum1 = (__m128)_mm_srli_si128(_sum, 4);
 				__m128 _sum2 = (__m128)_mm_srli_si128(_sum, 8);
 
+				// now add everything up:
+				// _sum3 = {f1, f2, f3, f4} +
+				//		   {f2, f3, f4, 00} =
+				//		   {f1+f2, f2+f3, f3+f4, f4}
+				//
+				// _sum4 = {f1+f2, f2+f3, f3+f4, f4} +
+				//		   {f3,    f4,    00,    00} =
+				//		   {f1+f2+f3, f2+f3+f4, f3+f4, f4}
+				//
+				// remember we don't care about f4 so the sum we want is now in the least significant 32 bits of _sum4
+				// if we wanted f4 too, we could just shift right one more time
 				__m128 _sum3 = _mm_add_ps(_sum, _sum1);
 				__m128 _sum4 = _mm_add_ps(_sum3, _sum2);
 
+				// now take the square root of the whole thing:
 				__m128 _sq = _mm_sqrt_ps(_sum4);
 				
+				// and save the result
 				_mm_storeu_ps(result, _sq);
 				output(x, y) = result[0];
 				
@@ -126,16 +146,21 @@ namespace {
 		vector<Image<PixGray<float>>> gradImg(2);
 		gradImg[0] = Image<PixGray<float>>(w, h);
 		gradImg[1] = Image<PixGray<float>>(w, h);
-
-		// bbGray <-- boxBlur(input);
 		
+		float dx[NUM_GRADIENT_DIRECTIONS];
+		float dy[NUM_GRADIENT_DIRECTIONS];
+
+		for (int i = 0; i < NUM_GRADIENT_DIRECTIONS; i++)
+		{
+		}
+
 		Eigen::VectorXf dx = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
 		Eigen::VectorXf dy = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
 
 		dx = dx.array().cos();
 		dy = dy.array().sin();
 
-		float const * input_itr = input.pod_begin();
+		float const * const input_ptr = input.pod_begin();
 
 		for (int i = 0; i < w; i++)
 		{
@@ -157,8 +182,7 @@ namespace {
 					if(i2 >= w) i2 = 2*w - 2 - i2;
 					if(j2 >= h) j2 = 2*h - 2 - j2;
 					
-					//float val = input.at(i1,j1).val() - input.at(i2,j2).val();
-					float val = &input_itr[w*i1+j1] - &input_itr[w*i2+j2];
+					float val = input_ptr[w*j1+i1] - input_ptr[w*j2+i2];
 
 					sumX +=  val * dx[k];
 					sumY +=  val * dy[k]; 
