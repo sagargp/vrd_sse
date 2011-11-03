@@ -25,7 +25,7 @@ using namespace std;
 /********************
  * SSE code
  ********************/
-{
+namespace {
 	Image<PixLAB<float>> blurredVariance_SSE(Image<PixLAB<float>> const lab, int const r)
 	{
 		NRT_INFO("Starting SSE blur r=" << r);
@@ -82,9 +82,14 @@ using namespace std;
 	Image<PixGray<float>> magnitudeLAB_SSE(Image<PixLAB<float>> lab)
 	{
 		Image<PixGray<float>> output(lab.dims());
-
-		for ( float const * labbegin = lab.pod_begin(); labbegin != lab.pod_end(); labbegin += 3)
+		float *outputbegin = output.pod_begin();
+ float const * labbegin = lab.pod_begin();
+		for (int y = 0; y < lab.height(); y++)
 		{
+			for (int x = 0; x < lab.width(); x++)
+			{
+		//for (; labbegin != lab.pod_end(); labbegin += 3)
+		//{
 			__m128 _channels = _mm_loadu_ps(labbegin); // _channels = [l, a, b]
 			_channels = _mm_mul_ps(_channels, _channels); // _channels = [l^2, a^2, b^2]
 
@@ -93,9 +98,13 @@ using namespace std;
 			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 2));
 			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 4));
 			_sum = _mm_add_epi8(_sum, _mm_srli_si128(_sum, 8));
-			
+
 			__m128 _sq = _mm_sqrt_ps( (__m128)_sum );
 			output(x, y) = _mm_cvtsi128_si32( (__m128i)_sq );
+			//*outputbegin = _mm_cvtsi128_si32( (__m128i)_sq );
+			//outputbegin++;
+		//}
+			}
 		}
 		return output;
 	}
@@ -105,12 +114,60 @@ using namespace std;
 		Image<PixLAB<float>> blurred(blurredVariance_SSE(lab, r));
 		return magnitudeLAB_SSE(blurred);
 	}
+
+	vector<Image<PixGray<float>>> calculateGradient_SSE(Image<PixGray<float>> gray, int const rad)
+	{
+		int w = gray.width();
+		int h = gray.height();
+
+		vector<Image<PixGray<float>>> gradImg(2);
+		gradImg[0] = Image<PixGray<float>>(w, h);
+		gradImg[1] = Image<PixGray<float>>(w, h);
+	
+		Eigen::VectorXf dx = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+		Eigen::VectorXf dy = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+
+		dx = dx.array().cos();
+		dy = dy.array().sin();
+
+		for (int i = 0; i < w; i++)
+		{
+			for (int j = 0; j < h; j++)
+			{
+				float sumX = 0.0;
+				float sumY = 0.0;
+				for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
+				{
+					int i1 = abs(i + rad*dx[k]);
+					int j1 = abs(j + rad*dy[k]);
+
+					int i2 = abs(i - rad*dx[k]);		
+					int j2 = abs(j - rad*dy[k]);
+					
+					if(i1 >= w) i1 = 2*w - 2 - i1;
+					if(j1 >= h) j1 = 2*h - 2 - j1;
+					  
+					if(i2 >= w) i2 = 2*w - 2 - i2;
+					if(j2 >= h) j2 = 2*h - 2 - j2;
+					
+					//float val = varBbImg.at(i1,j1).val() - varBbImg.at(i2,j2).val();
+					float val = gray.at(i1,j1).val() - gray.at(i2,j2).val();
+					
+					sumX +=  val * dx[k];
+					sumY +=  val * dy[k]; 
+				}
+				gradImg[0](i, j) = sumX;
+				gradImg[1](i, j) = sumY;
+			}
+		}
+		return gradImg;
+	}
 }
 
 /********************
  * Non-SSE code
  ********************/
-{
+namespace {
 	Image<PixLAB<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
 	{
 		NRT_INFO("Starting Blur r=" << r);
@@ -183,6 +240,54 @@ using namespace std;
 		Image<PixLAB<float>> blurred(blurredVariance(lab, r));
 		return magnitudeLAB(blurred);
 	}
+	
+	vector<Image<PixGray<float>>> calculateGradient(Image<PixGray<float>> gray, int const rad)
+	{
+		int w = gray.width();
+		int h = gray.height();
+
+		vector<Image<PixGray<float>>> gradImg(2);
+		gradImg[0] = Image<PixGray<float>>(w, h);
+		gradImg[1] = Image<PixGray<float>>(w, h);
+		
+		Eigen::VectorXf dx = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+		Eigen::VectorXf dy = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS, 0, (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+
+		dx = dx.array().cos();
+		dy = dy.array().sin();
+
+		for (int i = 0; i < w; i++)
+		{
+			for (int j = 0; j < h; j++)
+			{
+				float sumX = 0.0;
+				float sumY = 0.0;
+				for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
+				{
+					int i1 = abs(i + rad*dx[k]);
+					int j1 = abs(j + rad*dy[k]);
+
+					int i2 = abs(i - rad*dx[k]);		
+					int j2 = abs(j - rad*dy[k]);
+					
+					if(i1 >= w) i1 = 2*w - 2 - i1;
+					if(j1 >= h) j1 = 2*h - 2 - j1;
+					  
+					if(i2 >= w) i2 = 2*w - 2 - i2;
+					if(j2 >= h) j2 = 2*h - 2 - j2;
+					
+					//float val = varBbImg.at(i1,j1).val() - varBbImg.at(i2,j2).val();
+					float val = gray.at(i1,j1).val() - gray.at(i2,j2).val();
+					
+					sumX +=  val * dx[k];
+					sumY +=  val * dy[k]; 
+				}
+				gradImg[0](i, j) = sumX;
+				gradImg[1](i, j) = sumY;
+			}
+		}
+		return gradImg;
+	}
 }
 
 int main(int argc, const char** argv)
@@ -212,23 +317,33 @@ int main(int argc, const char** argv)
 
 	Image<PixRGB<float>> input = readImage(imageName.getVal()).convertTo<PixRGB<float>>();
 	Image<PixLAB<float>> lab(input);
-	
-	timer.begin();
-	Image<PixGray<float>> std(standardDeviationLAB(lab, 5));
-	timer.end();
-	NRT_INFO("normal blur: " << timer.report());
-	
-	timer.reset();
-
-	timer.begin();
-	Image<PixGray<float>> std_sse(standardDeviationLAB_SSE(lab, 5));
-	timer.end();
-	NRT_INFO("SSE blur: " << timer.report());
-	
-	Image<PixRGB<float>> output(std);
 
 	mySink->out(GenericImage(input), "Original RGB image");
-	mySink->out(GenericImage(output), "Output image");
+	
+	// Non-SSE
+	{
+		timer.begin();
+		Image<PixGray<float>> std(standardDeviationLAB(lab, 5));
+		timer.end();
+		
+		NRT_INFO("Non-SSE: " << timer.report());
+		
+		Image<PixRGB<float>> output(std);
+		mySink->out(GenericImage(output), "Output of non-SSE");
+	}
+
+	timer.reset();
+	// SSE
+	{
+		timer.begin();
+		Image<PixGray<float>> std(standardDeviationLAB_SSE(lab, 5));
+		timer.end();
+		
+		NRT_INFO("SSE: " << timer.report());
+		
+		Image<PixRGB<float>> output(std);
+		mySink->out(GenericImage(output), "Output of SSE");
+	}
 
 	//Image<PixLAB<float>> blurredLAB(blurredVariance(convertedLAB, 8));
 	//Image<PixRGB<float>> convertedRGB(convertedLAB);
