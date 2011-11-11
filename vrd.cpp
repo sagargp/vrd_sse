@@ -6,6 +6,7 @@
 #include <nrt/Eigen/EigenConversions.H>
 #include <xmmintrin.h> // sse
 #include <emmintrin.h> // sse3
+#include <valgrind/callgrind.h>
 
 using namespace nrt;
 using namespace std;
@@ -67,18 +68,16 @@ namespace sse {
 				{
 					for (int i = xlef; i <= xrig; i++)
 					{
-						// warning:
-						// at the last pixel, this could try to load 4 bytes of memory we don't own
-						float const * const pixbegin = &labbegin[(j*w+i)*3];
+						float const * const pixbegin = &labbegin[(j*w+i)*4];
 
-						__m128 _curpix = _mm_loadu_ps(pixbegin);
+						__m128 _curpix = _mm_load_ps(pixbegin);
 						_sum = _mm_add_ps(_curpix, _sum);
 					}
 				}
 				_result = _mm_div_ps(_sum, _boxsize);
 
 				float local_result[4];
-				_mm_storeu_ps(local_result, _result);
+				_mm_store_ps(local_result, _result);
 
 				float const l = local_result[0];
 				float const a = local_result[1];
@@ -90,6 +89,7 @@ namespace sse {
 				output_ptr[pos + 2] = b;
 			}
 		}
+		
 		TIMER_BLUR_SSE.end();
 		return output;
 	}
@@ -112,7 +112,7 @@ namespace sse {
 				//												 LSB		 MSB
 				// load the first 4 floats from labbegin: _sum = {f1, f2, f3, f4}
 				// (note f4 is the first channel of the next pixel; so we don't care about it for this iteration
-				__m128 _sum = _mm_loadu_ps(labbegin);
+				__m128 _sum = _mm_load_ps(labbegin);
 
 				// square each of them: {f1=f1^2, f2=f2^2, ...}
 				_sum = _mm_mul_ps(_sum, _sum);
@@ -144,7 +144,7 @@ namespace sse {
 				_mm_store_ps(result, _sq);
 				output(x, y) = result[0];
 
-				labbegin += 3;
+				labbegin += 4;
 			}
 		}
 
@@ -199,12 +199,12 @@ namespace sse {
 				float sumX = 0.0;
 				float sumY = 0.0;
 
-				for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k+=1)
+				for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
 				{
 					__m128 _ij = _mm_set_ps(i, j, i, j);
-					__m128 _raddxdy = _mm_loadu_ps(&(rad_dxdy_interleaved[k*4]));
+					__m128 _raddxdy = _mm_load_ps(&(rad_dxdy_interleaved[k*4]));
 
-					__m128 _ij12 = _mm_mul_ps(_ij, _raddxdy); 
+					__m128 _ij12 = _mm_add_ps(_ij, _raddxdy); 
 
 					_ij12 = _mm_andnot_ps(_signmask, _ij12);
 
@@ -214,9 +214,11 @@ namespace sse {
 
 					_mm_store_ps(ij12, _ij12);
 					float val = input_ptr[size_t(ij12[1]+ij12[0])] - input_ptr[size_t(ij12[3]+ij12[2])];
+					//float val = input_ptr[size_t(ij12[2]+ij12[3])] - input_ptr[size_t(ij12[0]+ij12[1])];
 
 					sumX +=  val * dx[k];
-					sumY +=  val * dy[k]; 
+					sumY +=  val * dy[k];
+
 				}
 				gradImg[0](i, j) = sumX;
 				gradImg[1](i, j) = sumY;
@@ -232,7 +234,7 @@ namespace sse {
  * Non-SSE code
  ********************/
 namespace slow {
-	Image<PixLABX<float>> blurredVariance(Image<PixLABX<float>> const lab, int const r)
+	Image<PixLAB<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
 	{
 		TIMER_BLUR_SLOW.begin();
 
@@ -240,7 +242,7 @@ namespace slow {
 		int w = lab.width();
 		int h = lab.height();
 
-		Image<PixLABX<float>> output(w, h, ImageInitPolicy::None);
+		Image<PixLAB<float>> output(w, h, ImageInitPolicy::None);
 
 		float const * const labbegin = lab.pod_begin();
 
@@ -278,7 +280,7 @@ namespace slow {
 				float g = sum_g/boxSize;
 				float b = sum_b/boxSize;
 
-				output(x,y) = PixLABX<float>(r,g,b,0.0);
+				output(x,y) = PixLAB<float>(r,g,b);
 			}
 		}
 
@@ -286,7 +288,7 @@ namespace slow {
 		return output;
 	}
 
-	Image<PixGray<float>> magnitudeLAB(Image<PixLABX<float>> lab)
+	Image<PixGray<float>> magnitudeLAB(Image<PixLAB<float>> lab)
 	{
 		TIMER_MAG_SLOW.begin();
 
@@ -458,7 +460,8 @@ int main(int argc, const char** argv)
 
 	int radius = 5;
 	Image<PixRGB<float>> input = readImage(imageName.getVal()).convertTo<PixRGB<float>>();
-	Image<PixLABX<float>> lab(input);
+	Image<PixLAB<float>> lab(input);
+	Image<PixLABX<float>> labx(input);
 	
 	//mySink->out(GenericImage(input), "Original RGB image");
 	
@@ -466,7 +469,7 @@ int main(int argc, const char** argv)
 	{
 		NRT_INFO("Starting slow transform");
 
-		Image<PixLABX<float>>			blurred(slow::blurredVariance(lab, radius));
+		Image<PixLAB<float>>			blurred(slow::blurredVariance(lab, radius));
 		Image<PixGray<float>>			varImg(slow::magnitudeLAB(blurred));
 		vector<Image<PixGray<float>>>	gradImgs = slow::calculateGradient(varImg, radius);
 		Image<PixGray<float>>			ridgeImg(slow::calculateRidge(gradImgs, radius));
@@ -479,7 +482,7 @@ int main(int argc, const char** argv)
 	{
 		NRT_INFO("Starting SSE transform");
 
-		Image<PixLABX<float>>			blurred(sse::blurredVariance(lab, radius));
+		Image<PixLABX<float>>			blurred(sse::blurredVariance(labx, radius));
 		Image<PixGray<float>>			varImg(sse::magnitudeLAB(blurred));
 		vector<Image<PixGray<float>>>	gradImgs = sse::calculateGradient(varImg, radius);
 		Image<PixGray<float>>			ridgeImg(slow::calculateRidge(gradImgs, radius));
