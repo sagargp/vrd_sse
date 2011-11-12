@@ -21,6 +21,7 @@ using namespace std;
 // }
 
 #define ROUND_DOWN(x, s) ((x) & ~((s)-1))
+#define FROUND(x) ( (int((x) * 1000000.0) / 1000000.0) )
 
 #define NUM_GRADIENT_DIRECTIONS	8
 #define NUM_RIDGE_DIRECTIONS	NUM_GRADIENT_DIRECTIONS/2
@@ -32,6 +33,16 @@ using namespace std;
 #define TIMER_BLUR_SSE	nrt::TimeProfiler<3>::instance()
 #define TIMER_MAG_SSE	nrt::TimeProfiler<4>::instance()
 #define TIMER_GRAD_SSE	nrt::TimeProfiler<5>::instance()
+
+void _print_reg(__m128 *r)
+{
+	float result[4];
+	_mm_storeu_ps(result, *r);
+
+	for (int i = 0; i < 4; i++)
+		cout << result[i] << " "; 
+	cout << endl;
+}
 
 /********************
  * SSE code
@@ -79,11 +90,11 @@ namespace sse {
 				float local_result[4];
 				_mm_store_ps(local_result, _result);
 
-				float const l = local_result[0];
-				float const a = local_result[1];
-				float const b = local_result[2];
+				float const l = local_result[3];
+				float const a = local_result[2];
+				float const b = local_result[1];
 
-				size_t const pos = (y*w + x)*3;
+				size_t const pos = (y*w + x)*4;
 				output_ptr[pos + 0] = l;
 				output_ptr[pos + 1] = a;
 				output_ptr[pos + 2] = b;
@@ -165,22 +176,31 @@ namespace sse {
 
 		float dx[NUM_GRADIENT_DIRECTIONS];
 		float dy[NUM_GRADIENT_DIRECTIONS];
-
 		float rad_dxdy_interleaved[NUM_GRADIENT_DIRECTIONS*4];
-
+		
 		float next = 0.0;
 		for (int i = 0; i < NUM_GRADIENT_DIRECTIONS; i++)
 		{
+			dx[i] =	FROUND(cos(next)); 
+			dy[i] = -FROUND(sin(next));
 			next += (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS;
-			dx[i] = cos(next); 
-			dy[i] = sin(next);
 
-			rad_dxdy_interleaved[i*4+0] = rad*dx[i];
-			rad_dxdy_interleaved[i*4+1] = rad*dy[i];
-			rad_dxdy_interleaved[i*4+3] = -rad*dx[i];
-			rad_dxdy_interleaved[i*4+3] = -rad*dy[i];
+			rad_dxdy_interleaved[i*4+0] = (rad*dx[i]);
+			rad_dxdy_interleaved[i*4+1] = (rad*dy[i]);
+			rad_dxdy_interleaved[i*4+2] = (-rad*dx[i]);
+			rad_dxdy_interleaved[i*4+3] = (-rad*dy[i]);
 		}
+		
+		cout << "dx: ";
+		for (int i = 0; i < sizeof(dx)/sizeof(float); i++)
+			cout << dx[i] << " ";
+		cout << endl;
 
+		cout << "dy: ";
+		for (int i = 0; i < sizeof(dy)/sizeof(float); i++)
+			cout << dy[i] << " ";
+		cout << endl;
+		
 		float const * const input_ptr = input.pod_begin();
 
 		static const __m128 _signmask = _mm_set1_ps(-0.f);
@@ -189,7 +209,7 @@ namespace sse {
 		__m128 _0 = _mm_setzero_ps();
 		__m128 _wh = _mm_set_ps(w-1, h-1, w-1, h-1);
 		__m128 _1w1w = _mm_set_ps(1, w, 1, w);
-
+		
 		float ij12[4];
 
 		for (float i = 0; i < w; i++)
@@ -199,13 +219,28 @@ namespace sse {
 				float sumX = 0.0;
 				float sumY = 0.0;
 
-				for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
+				for (int k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
 				{
-					__m128 _ij = _mm_set_ps(i, j, i, j);
-					__m128 _raddxdy = _mm_load_ps(&(rad_dxdy_interleaved[k*4]));
+					__m128 _ij = _mm_set_ps(j, i, j, i);
+					
+					cout << "ij: (" << i << " " << j << "): ";
+					_print_reg(&_ij);
 
+					__m128 _raddxdy = _mm_load_ps(&rad_dxdy_interleaved[k*4]);
+					
+					cout << "raddxdy (" << rad_dxdy_interleaved[k*4+0] << " " <<
+										   rad_dxdy_interleaved[k*4+1] << " " <<
+										   rad_dxdy_interleaved[k*4+2] << " " <<
+										   rad_dxdy_interleaved[k*4+3] << "): ";
+					
+					_print_reg(&_raddxdy);
+					
 					__m128 _ij12 = _mm_add_ps(_ij, _raddxdy); 
-
+					
+					cout << "add: ";
+					_print_reg(&_ij12);
+					cout << endl;
+					
 					_ij12 = _mm_andnot_ps(_signmask, _ij12);
 
 					_ij12 = _mm_min_ps(_wh, _ij12);
@@ -213,8 +248,8 @@ namespace sse {
 					_ij12 = _mm_mul_ps(_ij12, _1w1w);
 
 					_mm_store_ps(ij12, _ij12);
+					
 					float val = input_ptr[size_t(ij12[1]+ij12[0])] - input_ptr[size_t(ij12[3]+ij12[2])];
-					//float val = input_ptr[size_t(ij12[2]+ij12[3])] - input_ptr[size_t(ij12[0]+ij12[1])];
 
 					sumX +=  val * dx[k];
 					sumY +=  val * dy[k];
@@ -323,6 +358,16 @@ namespace slow {
 		dx = dx.array().cos();
 		dy = dy.array().sin();
 
+		cout << "dx: ";
+		for (int i = 0; i < dx.size(); i++)
+			cout << dx[i] << " ";
+		cout << endl;
+
+		cout << "dy: ";
+		for (int i = 0; i < dy.size(); i++)
+			cout << dy[i] << " ";
+		cout << endl;
+		
 		for (int i = 0; i < w; i++)
 		{
 			for (int j = 0; j < h; j++)
@@ -337,13 +382,21 @@ namespace slow {
 					int i2 = abs(i - rad*dx[k]);		
 					int j2 = abs(j - rad*dy[k]);
 
+					cout << "ij: (" << i << " " << j << "): ";
+					cout << i << " " << j << " " << i << " " << j << endl;
+					cout << "raddxdy: ";
+					cout << rad*dx[k] << " " << rad*dy[k] << " " << -rad*dx[k] << " " << -rad*dy[k] << endl;
+
+					cout << "add: ";
+					cout << i+rad*dx[k] << " " << j+rad*dy[k] << " " << i-rad*dx[k] << " " << j-rad*dy[k] << endl;
+					cout << endl;
+					
 					if(i1 >= w) i1 = 2*w - 2 - i1;
 					if(j1 >= h) j1 = 2*h - 2 - j1;
 
 					if(i2 >= w) i2 = 2*w - 2 - i2;
 					if(j2 >= h) j2 = 2*h - 2 - j2;
 
-					//float val = varBbImg.at(i1,j1).val() - varBbImg.at(i2,j2).val();
 					float val = gray.at(i1,j1).val() - gray.at(i2,j2).val();
 
 					sumX +=  val * dx[k];
