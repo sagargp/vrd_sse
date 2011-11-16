@@ -21,7 +21,7 @@ using namespace std;
 // }
 
 #define ROUND_DOWN(x, s) ((x) & ~((s)-1))
-#define FROUND(x) ( (int((x) * 1000000.0) / 1000000.0) )
+#define FROUND(x) ( (int((x) * 1.0) / 1.0) )
 
 #define NUM_GRADIENT_DIRECTIONS	8
 #define NUM_RIDGE_DIRECTIONS	NUM_GRADIENT_DIRECTIONS/2
@@ -37,7 +37,7 @@ using namespace std;
 void _print_reg(__m128 *r)
 {
 	float result[4];
-	_mm_storeu_ps(result, *r);
+	_mm_store_ps(result, *r);
 
 	for (int i = 0; i < 4; i++)
 		cout << result[i] << " "; 
@@ -56,7 +56,7 @@ namespace sse {
 		int w = lab.width();
 		int h = lab.height();
 
-		Image<PixLABX<float>> output(w, h, ImageInitPolicy::None);
+		Image<PixLABX<float>> output(w, h);
 		float* output_ptr = output.pod_begin();
 
 		float const * const labbegin = lab.pod_begin();
@@ -70,10 +70,10 @@ namespace sse {
 			{
 				__m128 _sum = _mm_setzero_ps();
 
-				int ytop = max(y-r, 0);
-				int ybot = min(y+r, h-1);
-				int xlef = max(x-r, 0);
-				int xrig = min(x+r, w-1);
+				int const ytop = max(y-r, 0);
+				int const ybot = min(y+r, h-1);
+				int const xlef = max(x-r, 0);
+				int const xrig = min(x+r, w-1);
 
 				for (int j = ytop; j <= ybot; j++)
 				{
@@ -90,9 +90,9 @@ namespace sse {
 				float local_result[4];
 				_mm_store_ps(local_result, _result);
 
-				float const l = local_result[3];
-				float const a = local_result[2];
-				float const b = local_result[1];
+				float const l = local_result[0];
+				float const a = local_result[1];
+				float const b = local_result[2];
 
 				size_t const pos = (y*w + x)*4;
 				output_ptr[pos + 0] = l;
@@ -100,7 +100,7 @@ namespace sse {
 				output_ptr[pos + 2] = b;
 			}
 		}
-		
+
 		TIMER_BLUR_SSE.end();
 		return output;
 	}
@@ -163,7 +163,7 @@ namespace sse {
 		return output;
 	}
 
-	vector<Image<PixGray<float>>> calculateGradient(Image<PixGray<float>> input, int const rad)
+	vector<Image<PixGray<float>>> calculateGradient(Image<PixGray<float>> input, int const r)
 	{
 		TIMER_GRAD_SSE.begin();
 
@@ -174,92 +174,71 @@ namespace sse {
 		gradImg[0] = Image<PixGray<float>>(w, h);
 		gradImg[1] = Image<PixGray<float>>(w, h);
 
-		float dx[NUM_GRADIENT_DIRECTIONS];
-		float dy[NUM_GRADIENT_DIRECTIONS];
-		float rad_dxdy_interleaved[NUM_GRADIENT_DIRECTIONS*4];
-		
-		float next = 0.0;
-		for (int i = 0; i < NUM_GRADIENT_DIRECTIONS; i++)
-		{
-			dx[i] =	FROUND(cos(next)); 
-			dy[i] = -FROUND(sin(next));
-			next += (NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS;
-
-			rad_dxdy_interleaved[i*4+0] = (rad*dx[i]);
-			rad_dxdy_interleaved[i*4+1] = (rad*dy[i]);
-			rad_dxdy_interleaved[i*4+2] = (-rad*dx[i]);
-			rad_dxdy_interleaved[i*4+3] = (-rad*dy[i]);
-		}
-		
-		cout << "dx: ";
-		for (int i = 0; i < sizeof(dx)/sizeof(float); i++)
-			cout << dx[i] << " ";
-		cout << endl;
-
-		cout << "dy: ";
-		for (int i = 0; i < sizeof(dy)/sizeof(float); i++)
-			cout << dy[i] << " ";
-		cout << endl;
-		
 		float const * const input_ptr = input.pod_begin();
 
-		static const __m128 _signmask = _mm_set1_ps(-0.f);
+		float dx[NUM_GRADIENT_DIRECTIONS];
+		float dy[NUM_GRADIENT_DIRECTIONS];
+		float rdxdy[NUM_GRADIENT_DIRECTIONS*4];
 
-		// load w, h into SSE regs
-		__m128 _0 = _mm_setzero_ps();
-		__m128 _wh = _mm_set_ps(w-1, h-1, w-1, h-1);
-		__m128 _1w1w = _mm_set_ps(1, w, 1, w);
-		
-		float ij12[4];
-
-		for (float i = 0; i < w; i++)
+		/* pre-load r*dx and r*dy */
+		for (int k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
 		{
-			for (float j = 0; j < h; j++)
+			float const idx = 2.0f*M_PI*float(k)/float(NUM_GRADIENT_DIRECTIONS);
+			dx[k] = cos(idx);
+			dy[k] = sin(idx);
+
+			rdxdy[4*k + 0] = int(+r*dx[k]);
+			rdxdy[4*k + 1] = int(+r*dy[k]);
+			rdxdy[4*k + 2] = int(-r*dx[k]);
+			rdxdy[4*k + 3] = int(-r*dy[k]);
+		}
+		/* now data starting at rdxdy[k] contains: (rdx[k], rdy[k], -rdx[k], -rdy[k]) */
+
+		__m128 _clamp = _mm_set_ps(h-2, w-2, h-2, w-2);
+		__m128 _1w1w = _mm_set_ps(w, 1, w, 1);
+		__m128 _signmask = _mm_set1_ps(-0.f);
+
+		float ij[4];
+
+		for (int j = 0; j < h; j++)
+		{
+			for (int i = 0; i < w; i++)
 			{
 				float sumX = 0.0;
 				float sumY = 0.0;
 
 				for (int k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
 				{
+					/* load (r*dx, r*dy, -r*dx, -r*dy) into an SSE reg */
+					__m128 _rdxdy = _mm_load_ps(&rdxdy[4*k]);	
+
+					/* set _ij = (i, j, i, j) */
 					__m128 _ij = _mm_set_ps(j, i, j, i);
-					
-					cout << "ij: (" << i << " " << j << "): ";
-					_print_reg(&_ij);
 
-					__m128 _raddxdy = _mm_load_ps(&rad_dxdy_interleaved[k*4]);
-					
-					cout << "raddxdy (" << rad_dxdy_interleaved[k*4+0] << " " <<
-										   rad_dxdy_interleaved[k*4+1] << " " <<
-										   rad_dxdy_interleaved[k*4+2] << " " <<
-										   rad_dxdy_interleaved[k*4+3] << "): ";
-					
-					_print_reg(&_raddxdy);
-					
-					__m128 _ij12 = _mm_add_ps(_ij, _raddxdy); 
-					
-					cout << "add: ";
-					_print_reg(&_ij12);
-					cout << endl;
-					
-					_ij12 = _mm_andnot_ps(_signmask, _ij12);
+					/* _ij = (i+rdx, j+rdy, i-rdx, j-rdx) */
+					_ij = _mm_add_ps(_ij, _rdxdy);
 
-					_ij12 = _mm_min_ps(_wh, _ij12);
-					_ij12 = _mm_max_ps(_ij12, _0);
-					_ij12 = _mm_mul_ps(_ij12, _1w1w);
+					/* _ij = abs( (i+rdx, j+rdy, i-rdx, j-rdx) ) */
+					_ij = _mm_andnot_ps(_signmask, _ij);
 
-					_mm_store_ps(ij12, _ij12);
-					
-					float val = input_ptr[size_t(ij12[1]+ij12[0])] - input_ptr[size_t(ij12[3]+ij12[2])];
+					/* clamp values inside _ij */
+					_ij = _mm_min_ps(_clamp, _ij);
 
-					sumX +=  val * dx[k];
-					sumY +=  val * dy[k];
+					/* reshape the coords in _ij into 1d */
+					_ij = _mm_mul_ps(_ij, _1w1w);
 
+					/* store _ij back into a regular float array: ij = j2 i2 j1 i1 */ 
+					_mm_store_ps(ij, _ij);
+
+					float val = input_ptr[int(ij[0] + ij[1])] - input_ptr[int(ij[2]+ij[3])];
+
+					sumX += val * dx[k];
+					sumY += val * dy[k];
 				}
 				gradImg[0](i, j) = sumX;
 				gradImg[1](i, j) = sumY;
 			}
 		}
-
 		TIMER_GRAD_SSE.end();
 		return gradImg;
 	}
@@ -358,16 +337,6 @@ namespace slow {
 		dx = dx.array().cos();
 		dy = dy.array().sin();
 
-		cout << "dx: ";
-		for (int i = 0; i < dx.size(); i++)
-			cout << dx[i] << " ";
-		cout << endl;
-
-		cout << "dy: ";
-		for (int i = 0; i < dy.size(); i++)
-			cout << dy[i] << " ";
-		cout << endl;
-		
 		for (int i = 0; i < w; i++)
 		{
 			for (int j = 0; j < h; j++)
@@ -382,15 +351,6 @@ namespace slow {
 					int i2 = abs(i - rad*dx[k]);		
 					int j2 = abs(j - rad*dy[k]);
 
-					cout << "ij: (" << i << " " << j << "): ";
-					cout << i << " " << j << " " << i << " " << j << endl;
-					cout << "raddxdy: ";
-					cout << rad*dx[k] << " " << rad*dy[k] << " " << -rad*dx[k] << " " << -rad*dy[k] << endl;
-
-					cout << "add: ";
-					cout << i+rad*dx[k] << " " << j+rad*dy[k] << " " << i-rad*dx[k] << " " << j-rad*dy[k] << endl;
-					cout << endl;
-					
 					if(i1 >= w) i1 = 2*w - 2 - i1;
 					if(j1 >= h) j1 = 2*h - 2 - j1;
 
@@ -515,7 +475,7 @@ int main(int argc, const char** argv)
 	Image<PixRGB<float>> input = readImage(imageName.getVal()).convertTo<PixRGB<float>>();
 	Image<PixLAB<float>> lab(input);
 	Image<PixLABX<float>> labx(input);
-	
+
 	//mySink->out(GenericImage(input), "Original RGB image");
 	
 	/* Non-SSE */
@@ -544,6 +504,7 @@ int main(int argc, const char** argv)
 		NRT_INFO("Done with SSE transform");
 	}
 
+	NRT_INFO("Image Dims: " << input.dims());
 	NRT_INFO("Slow Blurred Variance: " << TIMER_BLUR_SLOW.report());
 	NRT_INFO("SSE Blurred Variance: " << TIMER_BLUR_SSE.report());
 	
@@ -553,9 +514,7 @@ int main(int argc, const char** argv)
 	NRT_INFO("Slow Gradient:         " << TIMER_GRAD_SLOW.report());
 	NRT_INFO("SSE Gradient:         " << TIMER_GRAD_SSE.report());
 	
-	while(true)
-	{
-	}
+	while(true) { } 
 
 	return 0;
 }
