@@ -33,6 +33,7 @@ using namespace std;
 #define TIMER_BLUR_SSE	nrt::TimeProfiler<3>::instance()
 #define TIMER_MAG_SSE	nrt::TimeProfiler<4>::instance()
 #define TIMER_GRAD_SSE	nrt::TimeProfiler<5>::instance()
+#define TIMER_BLUR_INT	nrt::TimeProfiler<6>::instance()
 
 void _print_reg(__m128 *r)
 {
@@ -41,7 +42,6 @@ void _print_reg(__m128 *r)
 
 	for (int i = 0; i < 4; i++)
 		cout << result[i] << " "; 
-	cout << endl;
 }
 
 /********************
@@ -50,179 +50,90 @@ void _print_reg(__m128 *r)
 namespace sse {
 	Image<PixLABX<float>> blurredVarianceIntegralImage(Image<PixLABX<float>> const input, int const r)
 	{
-		int w = input.width();
-		int h = input.height();
-
-		Image<PixLABX<double>> integral(input);
-		Image<PixLABX<float>> output(w, h);
-		
-		// set the first row
-		for (int x = 1; x < w; x++)
-		{
-			PixLABX<double> current = integral(x, 0);
-			PixLABX<double> prev = integral(x-1, 0);
-			
-			double l = current.l() + prev.l();
-			double a = current.a() + prev.a();
-			double b = current.b() + prev.b();
-
-			integral(x, 0) = PixLABX<double>(l, a, b, 0.0);
-		}
-
-		// set the first col 
-		for (int y = 1; y < h; y++)
-		{
-			PixLABX<double> current = integral(0, y);
-			PixLABX<double> prev = integral(0, y-1);
-			
-			double l = current.l() + prev.l();
-			double a = current.a() + prev.a();
-			double b = current.b() + prev.b();
-
-			integral(0, y) = PixLABX<double>(l, a, b, 0.0);
-		}
-
-		// set every remaining pixel
-		for (int x = 1; x < w; x++)
-		{
-			for (int y = 1; y < h; y++)
-			{
-				PixLABX<double> left_i		= integral(x-1, y);
-				PixLABX<double> top_i		= integral(x, y-1);
-				PixLABX<double> toplef_i	= integral(x-1, y-1);
-				PixLABX<double> toplef		= input(x-1, y-1);
-				PixLABX<double> current		= input(x, y);
-				
-				double l = left_i.l() + top_i.l() - toplef_i.l() - toplef.l() + current.l(); 
-				double a = left_i.a() + top_i.a() - toplef_i.a() - toplef.a() + current.a(); 
-				double b = left_i.b() + top_i.b() - toplef_i.b() - toplef.b() + current.b(); 
-
-				integral(x, y) = PixLABX<double>(l, a, b, 0.0);
-			}
-		}
-
-		// naive integral image
-		//for (int x = 0; x < w; x++)
-		//{
-		//	for (int y = 0; y < h; y++)
-		//	{
-		//		double l = 0.0;
-		//		double a = 0.0;
-		//		double b = 0.0;
-		//		
-		//		for (int row = 0; row <= x; row++) {
-		//			l += input(row, y).l();
-		//			a += input(row, y).a();
-		//			b += input(row, y).b();
-		//		}
-		//		
-		//		for (int col = 0; col < y; col++) {
-		//			l += input(x, col).l();
-		//			a += input(x, col).a();
-		//			b += input(x, col).b();
-		//		}
-		//		integral(x, y) = PixLABX<double>(l, a, b, 0.0);
-		//	}
-		//}
-
-		for (int x = 0; x < w; x++)
-		{
-			for (int y = 0; y < h; y++)
-			{
-				cout << input(x, y).l() << "\t";
-			}
-			cout << endl;
-		}
-		cout << endl;
-		for (int x = 0; x < w; x++)
-		{
-			for (int y = 0; y < h; y++)
-			{
-				cout << integral(x, y).l() << "\t";
-			}
-			cout << endl;
-		}
-
-		// compute the blur
-		for (int x = 0; x < w; x++)
-		{
-			for (int y = 0; y < h; y++)
-			{
-				int ytop = max(y-r, 0);
-				int ybot = min(y+r, h-1);
-				int xlef = max(x-r, 0);
-				int xrig = min(x+r, w-1);
-
-				PixLABX<double> toplef = integral(xlef, ytop); 
-				PixLABX<double> toprig = integral(xrig, ytop); 
-				PixLABX<double> botrig = integral(xrig, ybot); 
-				PixLABX<double> botlef = integral(xlef, ybot); 
-
-				float l = (botrig.l() - botlef.l() - toprig.l() + toplef.l()) / (r*r);// ((xrig-xlef) * (ybot-ytop));
-				float a = (botrig.a() - botlef.a() - toprig.a() + toplef.a()) / (r*r);// ((xrig-xlef) * (ybot-ytop));
-				float b = (botrig.b() - botlef.b() - toprig.b() + toplef.b()) / (r*r);// ((xrig-xlef) * (ybot-ytop));
-
-				output(x, y) = PixLABX<float>(l, a, b, 0.0);
-			}
-		}
-		return output;
-	}
-
-	Image<PixLABX<float>> blurredVariance(Image<PixLABX<float>> const lab, int const r)
-	{
 		TIMER_BLUR_SSE.begin();
+		int const w = input.width();
+		int const h = input.height();
 
-		int boxSize = pow(2*r+1, 2);
-		int w = lab.width();
-		int h = lab.height();
+		Image<PixLABX<float>, UniqueAccess> integral(w, h, ImageInitPolicy::None);
+		Image<PixLABX<float>, UniqueAccess> output(w, h, ImageInitPolicy::None);
+        
+        float const * const integral_ptr = integral.pod_begin();
+        float const * const input_ptr = input.pod_begin();
+        float const * const output_ptr = output.pod_begin();
 
-		Image<PixLABX<float>> output(w, h);
-		float* output_ptr = output.pod_begin();
+		// set the first row and first column
+		integral(0, 0) = input(0, 0);
+		for (int x = 1; x < w; x++)
+        {
+            __m128 _prev = _mm_load_ps( &integral_ptr[ (x-1)*4] );
+            __m128 _curr = _mm_load_ps( &input_ptr[ x*4] );
 
-		float const * const labbegin = lab.pod_begin();
+            __m128 _resl = _mm_setzero_ps();
+            _resl = _mm_add_ps(_prev, _curr);
 
-		__m128 _boxsize = _mm_set_ps1(boxSize);
-		__m128 _result = _mm_setzero_ps();
+            _mm_store_ps((float*)&integral_ptr[x*4], _resl);
+        }
+        for (int y = 1; y < h; y++)
+        {
+            integral(0, y) = integral.at(0, y-1) + input.at(0, y);
+            
+            __m128 _prev = _mm_load_ps( &integral_ptr[ (y-1)*w*4] );
+            __m128 _curr = _mm_load_ps( &input_ptr[ y*w*4] );
 
-		for (int y = 0; y < h; y++)
-		{
-			for (int x = 0; x < w; x++)
-			{
-				__m128 _sum = _mm_setzero_ps();
+            __m128 _resl = _mm_setzero_ps();
+            _resl = _mm_add_ps(_prev, _curr);
 
-				int const ytop = max(y-r, 0);
-				int const ybot = min(y+r, h-1);
-				int const xlef = max(x-r, 0);
-				int const xrig = min(x+r, w-1);
+            _mm_store_ps((float*)&integral_ptr[y*w*4], _resl);
+        }
 
-				for (int j = ytop; j <= ybot; j++)
-				{
-					for (int i = xlef; i <= xrig; i++)
-					{
-						float const * const pixbegin = &labbegin[(j*w+i)*4];
+        // compute the integral image
+        for (int y = 1; y < h; y++)
+        {
+            for (int x = 1; x < w; x++)
+            {
+                __m128 _lfint = _mm_load_ps(&integral_ptr[ ((x-1) + (y-0)*w)*4 ]);
+                __m128 _tpint = _mm_load_ps(&integral_ptr[ ((x-0) + (y-1)*w)*4 ]);
+                __m128 _tlint = _mm_load_ps(&integral_ptr[ ((x-1) + (y-1)*w)*4 ]);
+                __m128 _currn = _mm_load_ps(&input_ptr[ (x + y*w)*4 ]);
+               
+                __m128 _reslt = _mm_setzero_ps();
+                _reslt = _mm_add_ps(_lfint, _tpint); 
+                _reslt = _mm_sub_ps(_reslt, _tlint); 
+                _reslt = _mm_add_ps(_reslt, _currn); 
+                
+                _mm_store_ps((float*)&integral_ptr[(y*w + x)*4], _reslt);
+            }
+        }
 
-						__m128 _curpix = _mm_load_ps(pixbegin);
-						_sum = _mm_add_ps(_curpix, _sum);
-					}
-				}
-				_result = _mm_div_ps(_sum, _boxsize);
+        // compute the blur
+        for (int y = 0; y < h; y++)
+        {
+            int const ytop = max(y-r, 0);
+            int const ybot = min(y+r, h-1);
 
-				float local_result[4];
-				_mm_store_ps(local_result, _result);
+            for (int x = 0; x < w; x++)
+            {
+                int const xlef = max(x-r, 0);
+                int const xrig = min(x+r, w-1);
+                
+                __m128 _toplef = _mm_load_ps( &integral_ptr[ (xlef + ytop*w)*4 ] );
+                __m128 _toprig = _mm_load_ps( &integral_ptr[ (xrig + ytop*w)*4 ] );
+                __m128 _botrig = _mm_load_ps( &integral_ptr[ (xrig + ybot*w)*4 ] );
+                __m128 _botlef = _mm_load_ps( &integral_ptr[ (xlef + ybot*w)*4 ] );
+                
+                __m128 _norm = _mm_set1_ps( (xrig-xlef) * (ybot-ytop) );
 
-				float const l = local_result[0];
-				float const a = local_result[1];
-				float const b = local_result[2];
+                __m128 _reslt = _mm_setzero_ps();
+                _reslt = _mm_sub_ps(_botrig, _botlef);
+                _reslt = _mm_sub_ps(_reslt, _toprig);
+                _reslt = _mm_add_ps(_reslt, _toplef);
+                _reslt = _mm_div_ps(_reslt, _norm);
 
-				size_t const pos = (y*w + x)*4;
-				output_ptr[pos + 0] = l;
-				output_ptr[pos + 1] = a;
-				output_ptr[pos + 2] = b;
-			}
-		}
-
+                _mm_store_ps((float*)&output_ptr[(y*w + x)*4], _reslt);
+            }
+        }
 		TIMER_BLUR_SSE.end();
-		return output;
+		return Image<PixLABX<float>>(output);
 	}
 
 	Image<PixGray<float>> magnitudeLAB(Image<PixLABX<float>> lab)
@@ -368,6 +279,64 @@ namespace sse {
  * Non-SSE code
  ********************/
 namespace slow {
+	Image<PixLAB<float>> blurredVarianceIntegralImage(Image<PixLAB<float>> const input, int const r)
+	{
+		TIMER_BLUR_SLOW.begin();
+		int const w = input.width();
+		int const h = input.height();
+
+		Image<PixLAB<float>, UniqueAccess> integral(w, h, ImageInitPolicy::None);
+		Image<PixLAB<float>, UniqueAccess> output(w, h, ImageInitPolicy::None);
+		
+		// set the first row and first column
+		integral(0, 0) = input(0, 0);
+		for (int x = 1; x < w; x++) integral(x, 0) = integral.at(x-1, 0) + input.at(x, 0);
+		for (int y = 1; y < h; y++) integral(0, y) = integral.at(0, y-1) + input.at(0, y);
+
+		// set every remaining pixel
+        for (int y = 1; y < h; y++)
+        {   
+            for (int x = 1; x < w; x++)
+            {
+				PixLAB<float> const & left_i    = integral.at(x-1, y);
+				PixLAB<float> const & top_i     = integral.at(x, y-1);
+				PixLAB<float> const & topleft_i = integral.at(x-1, y-1);
+				PixLAB<float> const & current   = input.at(x, y);
+
+                PixLAB<float> & result = integral(x, y);
+                result.channels[0] = left_i.channels[0] + top_i.channels[0] - topleft_i.channels[0] + current.channels[0];
+                result.channels[1] = left_i.channels[1] + top_i.channels[1] - topleft_i.channels[1] + current.channels[1];
+                result.channels[2] = left_i.channels[2] + top_i.channels[2] - topleft_i.channels[2] + current.channels[2];
+            }
+        }
+
+		// compute the blur
+        for (int y = 0; y < h; y++)
+        {
+            int const ytop = max(y-r, 0);
+            int const ybot = min(y+r, h-1);
+
+            for (int x = 0; x < w; x++)
+            {
+                int const xlef = max(x-r, 0);
+                int const xrig = min(x+r, w-1);
+
+				PixLAB<float> const & toplef = integral.at(xlef, ytop); 
+				PixLAB<float> const & toprig = integral.at(xrig, ytop); 
+				PixLAB<float> const & botrig = integral.at(xrig, ybot); 
+				PixLAB<float> const & botlef = integral.at(xlef, ybot); 
+
+                float const norm = (xrig-xlef)*(ybot-ytop);
+                PixLAB<float> & result = output(x, y);
+                result.channels[0] = (botrig.channels[0] - botlef.channels[0] - toprig.channels[0] + toplef.channels[0]) / norm; 
+                result.channels[1] = (botrig.channels[1] - botlef.channels[1] - toprig.channels[1] + toplef.channels[1]) / norm; 
+                result.channels[2] = (botrig.channels[2] - botlef.channels[2] - toprig.channels[2] + toplef.channels[2]) / norm; 
+            }
+		}
+		TIMER_BLUR_SLOW.end();
+		return Image<PixLAB<float>>(output);
+	}
+
 	Image<PixLAB<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
 	{
 		TIMER_BLUR_SLOW.begin();
@@ -599,31 +568,26 @@ int main(int argc, const char** argv)
 	//mySink->out(GenericImage(input), "Original RGB image");
 	
 	/* Non-SSE */
-	//{
-	//	NRT_INFO("Starting slow transform");
+	{
+		NRT_INFO("Starting slow transform");
 
-	//	Image<PixLAB<float>>			blurred(slow::blurredVariance(lab, radius));
-	//	Image<PixGray<float>>			varImg(slow::magnitudeLAB(blurred));
-	//	vector<Image<PixGray<float>>>	gradImgs = slow::calculateGradient(varImg, radius);
-	//	Image<PixGray<float>>			ridgeImg(slow::calculateRidge(gradImgs, radius));
-	//	
-	//	mySink->out(GenericImage(ridgeImg), "Slow (Non-SSE)");
-	//	NRT_INFO("Done with slow transform");
-	//}
+		Image<PixLAB<float>>			blurred(slow::blurredVarianceIntegralImage(lab, radius));
+		mySink->out(GenericImage(Image<PixGray<float>>(blurred)), "Slow blur");	
+        
+        //Image<PixGray<float>>			varImg(slow::magnitudeLAB(blurred));
+		//vector<Image<PixGray<float>>>	gradImgs = slow::calculateGradient(varImg, radius);
+		//Image<PixGray<float>>			ridgeImg(slow::calculateRidge(gradImgs, radius));
+		//
+		//mySink->out(GenericImage(ridgeImg), "Slow (Non-SSE)");
+		//NRT_INFO("Done with slow transform");
+	}
 
 	/* SSE */
 	{
 		NRT_INFO("Starting SSE transform");
 
-		Image<PixLABX<float>>			blurred(sse::blurredVariance(labx, radius));
-		Image<PixLABX<float>>			blurIntegral(sse::blurredVarianceIntegralImage(labx, radius));
-		
-		Image<PixGray<float>>			varImg(sse::magnitudeLAB(blurred));
-		Image<PixGray<float>>			varImgIntegral(sse::magnitudeLAB(blurIntegral));
-		
-		mySink->out(GenericImage(varImg), "Standard blur");	
-		mySink->out(GenericImage(varImgIntegral), "Integral blur");	
-		
+		Image<PixLABX<float>>			blurred(sse::blurredVarianceIntegralImage(labx, radius));
+		mySink->out(GenericImage(Image<PixGray<float>>(blurred)),  	   "SSE blur");	
 		
 		//vector<Image<PixGray<float>>>	gradImgs = sse::calculateGradient(varImg, radius);
 		//Image<PixGray<float>>			ridgeImg(slow::calculateRidge(gradImgs, radius));
