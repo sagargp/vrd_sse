@@ -1,12 +1,14 @@
 #include <nrt/Eigen/Eigen.H>
 #include <nrt/Eigen/EigenConversions.H>
+#include <nrt/ImageProc/Math/RangeOps.H>
 #include <nrt/ImageProc/IO/ImageSink/ImageSinks.H>
+#include <nrt/ImageProc/IO/ImageSource/ImageSources.H>
 #include <nrt/ImageProc/IO/ImageSource/ImageReaders/ImageReader.H>
 #include <nrt/Core/Debugging/TimeProfiler.H>
 #include <nrt/Core/Model/Manager.H>
 #include <emmintrin.h> // sse3
 #include <xmmintrin.h> // sse
-//#include <valgrind/callgrind.h>
+#include "PixelTypes.H"
 
 using namespace nrt;
 using namespace std;
@@ -33,20 +35,30 @@ void _print_reg(__m128 *r)
     cout << result[i] << " "; 
 }
 
+inline float hadd_ps(__m128 *a)
+{ 
+  float data[4];
+  _mm_store_ps(data, *a);
+
+  return data[0] + data[1] + data[2] + data[3];
+}
+
 /********************
  * SSE code
  ********************/
 namespace sse {
-  Image<PixLABX<float>> blurredVariance(Image<PixLABX<float>> const input, int const r)
+  Image<PixGray<float>> blurredVariance(Image<PixLABX<float>> const input, int const r)
   {
     TIMER_BLUR_SSE.begin();
     int const w = input.width();
     int const h = input.height();
 
     Image<PixLABX<float>, UniqueAccess> integral(w, h, ImageInitPolicy::None);
-    Image<PixLABX<float>, UniqueAccess> output(w, h, ImageInitPolicy::None);
+    Image<PixLABX<float>, UniqueAccess> integral2(w, h, ImageInitPolicy::None);
+    Image<PixGray<float>, UniqueAccess> output(w, h, ImageInitPolicy::None);
 
     float const * const integral_ptr = integral.pod_begin();
+    float const * const integral2_ptr = integral2.pod_begin();
     float const * const input_ptr = input.pod_begin();
     float const * const output_ptr = output.pod_begin();
 
@@ -63,25 +75,32 @@ namespace sse {
 
     // set the first row
     integral(0, 0) = input(0, 0);
+    integral2(0, 0) = input(0, 0);
     for (int x = 1; x < w; x++)
     {
       __m128 _prev = _mm_load_ps( &integral_ptr[ (x-1)*4] );
+      __m128 _prev2 = _mm_load_ps( &integral2_ptr[ (x-1)*4] );
       __m128 _curr = _mm_load_ps( &input_ptr[ x*4] );
 
       __m128 _resl = _mm_add_ps(_prev, _curr);
+      __m128 _resl2 = _mm_add_ps(_prev2, _mm_mul_ps(_curr, _curr));
 
       _mm_store_ps((float*)&integral_ptr[x*4], _resl);
+      _mm_store_ps((float*)&integral2_ptr[x*4], _resl2);
     }
 
     // set the first column
     for (int y = 1; y < h; y++)
     {
       __m128 _prev = _mm_load_ps( &integral_ptr[ (y-1)*w*4] );
+      __m128 _prev2 = _mm_load_ps( &integral2_ptr[ (y-1)*w*4] );
       __m128 _curr = _mm_load_ps( &input_ptr[ y*w*4] );
 
       __m128 _resl = _mm_add_ps(_prev, _curr);
+      __m128 _resl2 = _mm_add_ps(_prev2, _mm_mul_ps(_curr, _curr));
 
       _mm_store_ps((float*)&integral_ptr[y*w4], _resl);
+      _mm_store_ps((float*)&integral2_ptr[y*w4], _resl2);
     }
 
     // compute the integral image
@@ -94,16 +113,29 @@ namespace sse {
       {
         int const x1 = 4*(x-1);
 
+        __m128 _currn = _mm_load_ps(&input_ptr[ x*4 + w4*y ]); //(x + y*w)*4 ]);
+        __m128 _currn2 = _mm_mul_ps(_currn, _currn); 
+
         __m128 _lfint = _mm_load_ps(&integral_ptr[ x1 + w4*y ]); // ((x-1) + (y-0)*w)*4 ]);
         __m128 _tpint = _mm_load_ps(&integral_ptr[ x*4 + y1 ]); // ((x-0) + (y-1)*w)*4 ]);
         __m128 _tlint = _mm_load_ps(&integral_ptr[ x1 + y1 ]); //((x-1) + (y-1)*w)*4 ]);
-        __m128 _currn = _mm_load_ps(&input_ptr[ x*4 + w4*y ]); //(x + y*w)*4 ]);
 
         __m128 _reslt = _mm_add_ps(_lfint, _tpint); 
         _reslt = _mm_sub_ps(_reslt, _tlint); 
         _reslt = _mm_add_ps(_reslt, _currn); 
 
         _mm_store_ps((float*)&integral_ptr[(yw + x)*4], _reslt);
+        
+        /* squared */
+        __m128 _lfint2 = _mm_load_ps(&integral2_ptr[ x1 + w4*y ]); // ((x-1) + (y-0)*w)*4 ]);
+        __m128 _tpint2 = _mm_load_ps(&integral2_ptr[ x*4 + y1 ]); // ((x-0) + (y-1)*w)*4 ]);
+        __m128 _tlint2 = _mm_load_ps(&integral2_ptr[ x1 + y1 ]); //((x-1) + (y-1)*w)*4 ]);
+
+        __m128 _reslt2 = _mm_add_ps(_lfint2, _tpint2); 
+        _reslt2 = _mm_sub_ps(_reslt2, _tlint2); 
+        _reslt2 = _mm_add_ps(_reslt2, _currn2); 
+
+        _mm_store_ps((float*)&integral2_ptr[(yw + x)*4], _reslt2);
       }
     }
 
@@ -111,7 +143,8 @@ namespace sse {
     for (int y = 0; y < r;  y++)
     {
       int const ybot = w4*(y+r);
-      int const yw = y*w;
+
+      float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = 0; x < r; x++)
       {
@@ -129,10 +162,32 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
+        //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
+
+        /* squared */
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ 0 ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ ybot ] );
+
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+        
+        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+        outputrowptr++;
+
+        //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt2);
       }
     }
 
+    /*
     // compute the blur when y<r but x>2r (top edge)
     for (int y = 0; y < r; y++)
     {
@@ -319,6 +374,7 @@ namespace sse {
         _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt); 
       }
     }
+    */
 
     // compute the blur on the rest of the image
     _norm = _mm_set1_ps( 4*r*r ); 
@@ -326,7 +382,8 @@ namespace sse {
     {
       int const ytop = w4*(y-r);
       int const ybot = w4*(y+r);
-      int const yw = y*w;
+
+      float * outputrowptr = output.pod_begin() + y*w + r; 
 
       for (int x = r; x < w-r; x++)
       {
@@ -343,12 +400,32 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
+        //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
+        
+        /* squared */
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + ybot ] );
+
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+        
+        *outputrowptr = sqrt(hadd_ps(&_l2norm));
+        outputrowptr++;
+        //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
       }
     }
 
     TIMER_BLUR_SSE.end();
-    return Image<PixLABX<float>>(output);
+    return Image<PixGray<float>>(output);
   }
 
   Image<PixGray<float>> magnitudeLAB(Image<PixLABX<float>> lab)
@@ -382,12 +459,12 @@ namespace sse {
 
         // now add everything up:
         // _sum3 = {f1, f2, f3, f4} +
-        //       {f2, f3, f4, 00} =
-        //       {f1+f2, f2+f3, f3+f4, f4}
+        //         {f2, f3, f4, 00} =
+        //         {f1+f2, f2+f3, f3+f4, f4}
         //
         // _sum4 = {f1+f2, f2+f3, f3+f4, f4} +
-        //       {f3,    f4,    00,    00} =
-        //       {f1+f2+f3, f2+f3+f4, f3+f4, f4}
+        //         {f3,    f4,    00,    00} =
+        //         {f1+f2+f3, f2+f3+f4, f3+f4, f4}
         //
         // remember we don't care about f4 so the sum we want is now in the least significant 32 bits of _sum4
         // if we wanted f4 too, we could just shift right one more time
@@ -492,84 +569,65 @@ namespace sse {
     return gradImg;
   }
 
-  Image<PixGray<float>> calculateRidge(vector<Image<PixGray<float>>> const &gradImg, int const rad)
+  Image<PixGray<float>> calculateRidge(vector<Image<PixGray<float>>> const &gradImg, int const r)
   {
+    TIMER_RIDGE_SSE.begin();
+    
     int w = gradImg[0].width();
     int h = gradImg[0].height();
 
-    Image<PixGray<float>> ridgeImg(w, h);
+    Image<PixGray<float>> ridgeImage(w,h);
 
-    Eigen::VectorXf dx = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS,0,(NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
-    Eigen::VectorXf dy = Eigen::VectorXf::LinSpaced(NUM_GRADIENT_DIRECTIONS,0,(NUM_GRADIENT_DIRECTIONS-1)*2*M_PI/NUM_GRADIENT_DIRECTIONS);
+    float dx[NUM_GRADIENT_DIRECTIONS];
+    float dy[NUM_GRADIENT_DIRECTIONS];
 
-    dx = dx.array().cos();
-    dy = dy.array().sin();
+    float const pi2 = 2.0f*M_PI;
+    float const norm = 1/float(NUM_GRADIENT_DIRECTIONS);
 
-    std::vector<std::vector<Eigen::MatrixXf> > dVin(NUM_GRADIENT_DIRECTIONS);
-
-    // Look at neighboring pixels in a border defined by radius (rad) in the gradient image for evidence that supports the gradient orientation (k) at this pixel (i,j)
-    // Only set the pixel (dVin) if there is positive evidence (threshold at 0)
-    for (uint k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
+    /* pre-load dx and dy */
+    for (int k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
     {
-      dVin[k].resize(2);
-      dVin[k][0] = Eigen::MatrixXf::Zero(w, h);
-      dVin[k][1] = Eigen::MatrixXf::Zero(w, h);
+      float const idx = pi2*float(k)*norm;
+      dx[k] = cos(idx);
+      dy[k] = sin(idx);
+    }
 
+    for (int j = 0; j < h; j++)
+    {
       for (int i = 0; i < w; i++)
       {
-        for (int j = 0; j < h; j++)
+        float max = -std::numeric_limits<float>::max();
+
+        for (int k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
         {
-          int ii = abs(i + rad*dx[k]);
-          int jj = abs(j + rad*dy[k]); 
+          int i_p = std::min(float(w-2), i + r*dx[k]);
+          int j_p = std::min(float(h-2), j + r*dy[k]);
+          int i_m = std::max(0.0F,		 i - r*dx[k]);
+          int j_m = std::max(0.0F, 		 j - r*dy[k]);
 
-          if(ii >= w) ii = 2*w - 2 - ii;
-          if(jj >= h) jj = 2*h - 2 - jj;
+          float rgeo = sqrt(std::max(0.0F, 
+                -(gradImg[0].at(i_m, j_m).val() * dx[k] + gradImg[1].at(i_m, j_m).val() * dy[k]) * 
+                (gradImg[0].at(i_p, j_p).val() * dx[k] + gradImg[1].at(i_p, j_p).val() * dy[k])));
 
-          float vX = gradImg[0].at(ii,jj).val(); 
-          float vY = gradImg[1].at(ii,jj).val();
-          if((vX*dx[k] + vY*dy[k]) < 0.0)
-          {
-            dVin[k][0](i,j) = vX;
-            dVin[k][1](i,j) = vY;
-          }
+          float rarith = std::max(0.0F,
+              (gradImg[0].at(i_m, j_m).val() * dx[k] + gradImg[1].at(i_m, j_m).val() * dy[k]) - 
+              (gradImg[0].at(i_p, j_p).val() * dx[k] + gradImg[1].at(i_p, j_p).val() * dy[k])
+              );
+
+          max = std::max(max, rgeo+rarith);
+
+          //float ridge = -gradImg[0].at(i_p, j_p).val()*gradImg[0].at(i_m, j_m).val() - gradImg[1].at(i_p, j_p).val()*gradImg[1].at(i_m, j_m).val();
+          //ridge = sqrt(std::max(0.0F, ridge));
+
+          //ridge += sqrt(pow(gradImg[0].at(i_p, j_p).val() - gradImg[0].at(i_p, j_p).val(), 2) + pow(gradImg[1].at(i_p, j_p).val() - gradImg[1].at(i_p, j_p).val(), 2))/2.0F;
+
+          //max = std::max(max, ridge);
         }
+        ridgeImage(i,j) = PixGray<float>(max) - sqrt(pow(gradImg[0].at(i,j).val(), 2) + pow(gradImg[1].at(i,j).val(), 2));
       }
     }
-
-    vector<Eigen::MatrixXf> rDir(NUM_RIDGE_DIRECTIONS);
-    for(uint k = 0; k < NUM_RIDGE_DIRECTIONS; k++)
-    {
-      rDir[k].setZero(w,h); 
-
-      uint k2 = k + NUM_RIDGE_DIRECTIONS;
-
-      // Calculate the dot product between the gradient on the positive side (k) and the negative side (k2) 
-      Eigen::MatrixXf gVal = -(dVin[k][0].array()*dVin[k2][0].array() + dVin[k][1].array()*dVin[k2][1].array());
-      // rDir is set to zero, so this operation with rectify gVal at zero
-      rDir[k] = rDir[k].cwiseMax(gVal);
-      // Take square root of direction
-      rDir[k] = rDir[k].array().sqrt();    
-    }
-
-    // Next step is to find the maximum ridge response across all ridge directions
-    // To do this, we will max pairs of ridge direction matrices and merge iteratively
-    int endRes = NUM_RIDGE_DIRECTIONS;
-    while(endRes>1)
-    {
-      int leftOver = 0;
-      for(int i=0;i<endRes;i+=2)
-      {
-        if(i+1<endRes)
-          rDir[i/2] = rDir[i].cwiseMax(rDir[i+1]);
-        else
-        {
-          rDir[i/2] = rDir[i];
-          leftOver = 1;
-        }
-      }
-      endRes = (endRes >> 1) + leftOver;
-    }
-    return eigenMatrixToImage<float>(rDir[0]);
+    TIMER_RIDGE_SSE.end();
+    return ridgeImage;
   }
 }
 
@@ -760,6 +818,8 @@ namespace slow {
 
   Image<PixGray<float>> calculateRidge(vector<Image<PixGray<float>>> const &gradImg, int const rad)
   {
+    TIMER_RIDGE_SLOW.begin();
+
     int w = gradImg[0].width();
     int h = gradImg[0].height();
 
@@ -835,6 +895,8 @@ namespace slow {
       }
       endRes = (endRes >> 1) + leftOver;
     }
+
+    TIMER_RIDGE_SLOW.end();
     return eigenMatrixToImage<float>(rDir[0]);
   }
 }
@@ -855,57 +917,68 @@ int main(int argc, const char** argv)
   Manager mgr(argc, argv);
   Parameter<string> imageName(ParameterDef<string>("image", "The image filename", ""), &mgr);
   shared_ptr<ImageSink> mySink(new ImageSink("MySink"));
+
+  shared_ptr<ImageSource> mySource(new ImageSource);
+  mgr.addSubComponent(mySource);
+
   mgr.addSubComponent(mySink);
   mgr.launch();
 
   int radius = 5;
-  Image<PixRGB<float>> input = readImage(imageName.getVal()).convertTo<PixRGB<float>>();
-  Image<PixLAB<float>> lab(input);
-  Image<PixLABX<float>> labx(input);
-
-  //mySink->out(GenericImage(input), "Original RGB image");
-
-  /* Non-SSE */
+  while(mySource->ok())
   {
-    NRT_INFO("Starting slow transform");
+    Image<PixRGB<float>> input(mySource->in().convertTo<PixRGB<float>>());
+    //Image<PixRGB<float>> input = readImage(imageName.getVal()).convertTo<PixRGB<float>>();
+    Image<PixLAB<float>> lab(input);
+    Image<PixLABX<float>> labx(input);
 
-    Image<PixLAB<float>>          blurred(slow::blurredVarianceIntegralImage(lab, radius));
-    mySink->out(GenericImage(Image<PixGray<float>>(blurred)), "Slow blur");
+    //mySink->out(GenericImage(input), "Original RGB image");
+	
+    for (int i = 0; i < 100; i++)
+	{
+		///* Non-SSE */
+		{
+			NRT_INFO("Starting slow transform");
 
-    //Image<PixGray<float>>         varImg(slow::magnitudeLAB(blurred));
-    //vector<Image<PixGray<float>>> gradImgs = slow::calculateGradient(varImg, radius);
-    //Image<PixGray<float>>         ridgeImg(slow::calculateRidge(gradImgs, radius));
-    //
-    //mySink->out(GenericImage(ridgeImg), "Slow (Non-SSE)");
-    //NRT_INFO("Done with slow transform");
+			Image<PixLAB<float>>          blurred(slow::blurredVarianceIntegralImage(lab, radius));
+			Image<PixGray<float>>         varImg(slow::magnitudeLAB(blurred));
+			vector<Image<PixGray<float>>> gradImgs = slow::calculateGradient(varImg, radius);
+			Image<PixGray<float>>         ridgeImg(slow::calculateRidge(gradImgs, radius));
+
+			//mySink->out(GenericImage(ridgeImg), "Slow (Non-SSE)");
+			NRT_INFO("Done with slow transform");
+		}
+
+		/* SSE */
+		{
+			NRT_INFO("Starting SSE transform");
+
+			Image<PixGray<float>>         blurred(sse::blurredVariance(labx, radius));
+			vector<Image<PixGray<float>>> gradImgs = sse::calculateGradient(blurred, radius);
+			Image<PixGray<float>>         ridgeImg(sse::calculateRidge(gradImgs, radius));
+
+			//Image<PixRGB<byte>> displayImage(normalize<float>(ridgeImg, PixGray<float>(0.0), PixGray<float>(255.0)));
+			//mySink->out(GenericImage(displayImage), "Slow (Non-SSE)");
+			NRT_INFO("Done with SSE transform");
+		}
+	}
+	NRT_INFO("Timing info for 100 runs:");
+
+    NRT_INFO("Image Dims:\t" << input.dims());
+    NRT_INFO("Slow Box Blur:\t" << TIMER_BLUR_SLOW.report());
+    NRT_INFO("SSE Box Blur:\t" << TIMER_BLUR_SSE.report());
+
+    NRT_INFO("Slow Magnitude:\t" << TIMER_MAG_SLOW.report());
+    NRT_INFO("SSE Magnitude:\t" << TIMER_MAG_SSE.report());
+
+    NRT_INFO("Slow Gradient:\t" << TIMER_GRAD_SLOW.report());
+    NRT_INFO("SSE Gradient:\t" << TIMER_GRAD_SSE.report());
+
+    NRT_INFO("Slow Var Ridge:\t" << TIMER_RIDGE_SLOW.report());
+    NRT_INFO("SSE Var Ridge:\t" << TIMER_RIDGE_SSE.report());
   }
 
-  /* SSE */
-  {
-    NRT_INFO("Starting SSE transform");
-
-    Image<PixLABX<float>>         blurred(sse::blurredVariance(labx, radius));
-    mySink->out(GenericImage(Image<PixGray<float>>(blurred)), "SSE blur"); 
-
-    //Image<PixGray<float>>         varImg(sse::magnitudeLAB(blurred));
-    //vector<Image<PixGray<float>>> gradImgs = sse::calculateGradient(varImg, radius);
-    //Image<PixGray<float>>         ridgeImg(sse::calculateRidge(gradImgs, radius));
-
-    //mySink->out(GenericImage(ridgeImg), "SSE");
-    //NRT_INFO("Done with SSE transform");
-  }
-
-  NRT_INFO("Image Dims:\t" << input.dims());
-  NRT_INFO("Slow Box Blur:\t" << TIMER_BLUR_SLOW.report());
-  NRT_INFO("SSE Box Blur:\t" << TIMER_BLUR_SSE.report());
-
-  NRT_INFO("Slow Magnitude:\t" << TIMER_MAG_SLOW.report());
-  NRT_INFO("SSE Magnitude:\t" << TIMER_MAG_SSE.report());
-
-  NRT_INFO("Slow Gradient:\t" << TIMER_GRAD_SLOW.report());
-  NRT_INFO("SSE Gradient:\t" << TIMER_GRAD_SSE.report());
-
-  while(true) { } 
+  while (true);
 
   return 0;
 }
