@@ -6,7 +6,7 @@
 #include <nrt/Core/Model/Manager.H>
 #include <emmintrin.h> // sse3
 #include <xmmintrin.h> // sse
-#include <valgrind/callgrind.h>
+//#include <valgrind/callgrind.h>
 
 using namespace nrt;
 using namespace std;
