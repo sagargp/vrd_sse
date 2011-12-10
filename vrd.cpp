@@ -8,6 +8,7 @@
 #include <nrt/Core/Model/Manager.H>
 #include <emmintrin.h> // sse3
 #include <xmmintrin.h> // sse
+#include <valgrind/callgrind.h>
 #include "PixelTypes.H"
 
 using namespace nrt;
@@ -69,8 +70,8 @@ namespace sse {
     int const norm_w1r = w+r-1;
     int const norm_h1r = h+r-1;
     int const w4 = 4*w;
-    int const xrigw = 4*(w-1);
-    int const yboth = w4*(h-1);
+    int const xrigw = 4*(2*w-2-r);
+    int const yboth = w4*(2*h-2-r);
     __m128 _norm = _mm_setzero_ps();
 
     // set the first row
@@ -125,7 +126,7 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _currn); 
 
         _mm_store_ps((float*)&integral_ptr[(yw + x)*4], _reslt);
-        
+
         /* squared */
         __m128 _lfint2 = _mm_load_ps(&integral2_ptr[ x1 + w4*y ]); // ((x-1) + (y-0)*w)*4 ]);
         __m128 _tpint2 = _mm_load_ps(&integral2_ptr[ x*4 + y1 ]); // ((x-0) + (y-1)*w)*4 ]);
@@ -143,17 +144,18 @@ namespace sse {
     for (int y = 0; y < r;  y++)
     {
       int const ybot = w4*(y+r);
-
+      int const ytop = w4*abs(y-r);
       float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = 0; x < r; x++)
       {
         int const xrig = 4*(x+r);
+        int const xlef = 4*abs(x-r);
 
-        __m128 _toplef = _mm_load_ps( &integral_ptr[ 0 ] );
-        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig ] );
+        __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef + ytop ] );
+        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig + ytop ] );
         __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral_ptr[ ybot ] );
+        __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + ybot ] );
 
         _norm = _mm_set1_ps( (x+r)*(y+r) );
 
@@ -162,13 +164,11 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
-
-        /* squared */
-        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ 0 ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig ] );
+        // squared
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
         __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + ybot ] );
 
         __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
         _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
@@ -176,31 +176,28 @@ namespace sse {
         _reslt2 = _mm_div_ps(_reslt2, _norm);
 
         // output = integral2 - integral^2
-
         __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
         _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-        
+
         *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
         outputrowptr++;
-
-        //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt2);
       }
     }
 
-    /*
     // compute the blur when y<r but x>2r (top edge)
     for (int y = 0; y < r; y++)
     {
       int const ybot = w4*(y+r);
-      int const yw = y*w;
+      int const ytop = w4*abs(y-r);
+      float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = r; x < w-r; x++)
       {
         int const xlef = 4*(x-r);
         int const xrig = 4*(x+r);
 
-        __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef ] );
-        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig ] );
+        __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef + ytop ] );
+        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig + ytop ] );
         __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + ybot ] );
         __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + ybot ] );
 
@@ -211,7 +208,22 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + ybot ] );
+
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+
+        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+        outputrowptr++;
       }
     }
 
@@ -219,15 +231,17 @@ namespace sse {
     for (int y = 0; y < r; y++)
     {
       int const ybot = w4*(y+r);
-      int const yw = y*w;
+      int const ytop = w4*abs(y-r);
+      float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = w-r; x < w; x++)
       {
         int const xlef = 4*(x-r);
+        int const xrig = xrigw - 4*w; 
 
-        __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef ] );
-        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrigw ] );
-        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrigw + ybot ] );
+        __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef + ytop ] );
+        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig + ytop ] );
+        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + ybot ] );
         __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + ybot ] );
 
         _norm = _mm_set1_ps( (y+r)*(norm_w1r-x) );
@@ -237,7 +251,22 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[(yw + x)<<2], _reslt);
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + ybot ] );
+
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+
+        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+        outputrowptr++;
       }
     }
 
@@ -246,16 +275,17 @@ namespace sse {
     {
       int const ytop = w4*(y-r);
       int const ybot = w4*(y+r);
-      int const yw = y*w;
+      float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = 0; x < r; x++)
       {
         int const xrig = 4*(x+r);
+        int const xlef = 4*abs(x-r);
 
-        __m128 _toplef = _mm_load_ps( &integral_ptr[ ytop ] );
+        __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef + ytop ] );
         __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig + ytop ] );
         __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral_ptr[ ybot ] );
+        __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + ybot ] );
 
         _norm = _mm_set1_ps( x*norm_2r + norm_2r2 );
 
@@ -264,7 +294,22 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);       
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + ybot ] );
+
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+
+        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+        outputrowptr++;
       }
     }
 
@@ -272,16 +317,18 @@ namespace sse {
     for (int y = h-r; y < h; y++)
     {
       int const ytop = w4*(y-r);
-      int const yw = y*w;
+      int const ybot = yboth - y*w4;
+      float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = 0; x < r; x++)
       {
         int const xrig = 4*(x+r);
+        int const xlef = 4*abs(x-r);
 
-        __m128 _toplef = _mm_load_ps( &integral_ptr[ ytop ] );
+        __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef + ytop ] );
         __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + yboth ] );
-        __m128 _botlef = _mm_load_ps( &integral_ptr[ yboth ] );
+        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + ybot ] );
+        __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + ybot ] );
 
         _norm = _mm_set1_ps( (norm_h1r-y)*(x+r) );
 
@@ -290,8 +337,22 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt); 
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + ybot ] );
 
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+
+        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+        outputrowptr++;
       }
     }
 
@@ -299,7 +360,8 @@ namespace sse {
     for (int y = h-r; y < h; y++)
     {
       int const ytop = w4*(y-r);
-      int const yw = y*w;
+      int const ybot = yboth - y*w4; 
+      float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = r; x < w-r; x++)
       {
@@ -308,8 +370,8 @@ namespace sse {
 
         __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef + ytop ] );
         __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + yboth ] );
-        __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + yboth ] );
+        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + ybot ] );
+        __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + ybot ] );
 
         _norm = _mm_set1_ps( (norm_h1r-y)*norm_2r );
 
@@ -318,7 +380,22 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt); 
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + yboth ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + yboth ] );
+
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+
+        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+        outputrowptr++;
       }
     }
 
@@ -326,16 +403,18 @@ namespace sse {
     for (int y = h-r; y < h; y++)
     {
       int const ytop = w4*(y-r);
-      int const yw = y*w;
+      int const ybot = yboth - y*w4; 
+      float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = w-r; x < w; x++)
       {
         int const xlef = 4*(x-r);
+        int const xrig = xrigw - 4*x;
 
         __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrigw + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrigw + yboth ] );
-        __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + yboth ] );
+        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig + ytop ] );
+        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + ybot ] );
+        __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + ybot ] );
 
         _norm = _mm_set1_ps( (norm_h1r-y)*(norm_w1r-x) ); 
 
@@ -344,7 +423,22 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt); 
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + ybot ] );
+
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+
+        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+        outputrowptr++;
       }
     }
 
@@ -353,15 +447,16 @@ namespace sse {
     {
       int const ytop = w4*(y-r);
       int const ybot = w4*(y+r);
-      int const yw = y*w;
+      float * outputrowptr = output.pod_begin() + y*w;
 
       for (int x = w-r; x < w; x++)
       {
         int const xlef = 4*(x-r);
+        int const xrig = xrigw - 4*x;
 
         __m128 _toplef = _mm_load_ps( &integral_ptr[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrigw + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrigw + ybot ] );
+        __m128 _toprig = _mm_load_ps( &integral_ptr[ xrig + ytop ] );
+        __m128 _botrig = _mm_load_ps( &integral_ptr[ xrig + ybot ] );
         __m128 _botlef = _mm_load_ps( &integral_ptr[ xlef + ybot ] );
 
         _norm = _mm_set1_ps( norm_2r*(norm_w1r-x) ); 
@@ -371,10 +466,24 @@ namespace sse {
         _reslt = _mm_add_ps(_reslt, _toplef);
         _reslt = _mm_div_ps(_reslt, _norm);
 
-        _mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt); 
+        __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
+        __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
+        __m128 _botrig2 = _mm_load_ps( &integral2_ptr[ xrig + ybot ] );
+        __m128 _botlef2 = _mm_load_ps( &integral2_ptr[ xlef + ybot ] );
+
+        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+        _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+        // output = integral2 - integral^2
+        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+
+        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+        outputrowptr++;
       }
     }
-    */
 
     // compute the blur on the rest of the image
     _norm = _mm_set1_ps( 4*r*r ); 
@@ -401,7 +510,7 @@ namespace sse {
         _reslt = _mm_div_ps(_reslt, _norm);
 
         //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
-        
+
         /* squared */
         __m128 _toplef2 = _mm_load_ps( &integral2_ptr[ xlef + ytop ] );
         __m128 _toprig2 = _mm_load_ps( &integral2_ptr[ xrig + ytop ] );
@@ -417,7 +526,7 @@ namespace sse {
 
         __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
         _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-        
+
         *outputrowptr = sqrt(hadd_ps(&_l2norm));
         outputrowptr++;
         //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
@@ -426,64 +535,6 @@ namespace sse {
 
     TIMER_BLUR_SSE.end();
     return Image<PixGray<float>>(output);
-  }
-
-  Image<PixGray<float>> magnitudeLAB(Image<PixLABX<float>> lab)
-  {
-    TIMER_MAG_SSE.begin();
-
-    int w = lab.width();
-    int h = lab.height();
-    Image<PixGray<float>> output(w, h);
-
-    float const * labbegin = lab.pod_begin();
-    float result[4];
-
-    for (int y = 0; y < lab.height(); y++)
-    {
-      for (int x = 0; x < lab.width(); x++)
-      {
-        //                         LSB     MSB
-        // load the first 4 floats from labbegin: _sum = {f1, f2, f3, f4}
-        // (note f4 is the first channel of the next pixel; so we don't care about it for this iteration
-        __m128 _sum = _mm_load_ps(labbegin);
-
-        // square each of them: {f1=f1^2, f2=f2^2, ...}
-        _sum = _mm_mul_ps(_sum, _sum);
-
-        // shift _sum right (toward the LSB):
-        // _sum1 = {f2, f3, f4, 00}
-        // _sum2 = {f3, f4, 00, 00}
-        __m128 _sum1 = (__m128)_mm_srli_si128(_sum, 4);
-        __m128 _sum2 = (__m128)_mm_srli_si128(_sum, 8);
-
-        // now add everything up:
-        // _sum3 = {f1, f2, f3, f4} +
-        //         {f2, f3, f4, 00} =
-        //         {f1+f2, f2+f3, f3+f4, f4}
-        //
-        // _sum4 = {f1+f2, f2+f3, f3+f4, f4} +
-        //         {f3,    f4,    00,    00} =
-        //         {f1+f2+f3, f2+f3+f4, f3+f4, f4}
-        //
-        // remember we don't care about f4 so the sum we want is now in the least significant 32 bits of _sum4
-        // if we wanted f4 too, we could just shift right one more time
-        __m128 _sum3 = _mm_add_ps(_sum, _sum1);
-        __m128 _sum4 = _mm_add_ps(_sum3, _sum2);
-
-        // now take the square root of the whole thing:
-        __m128 _sq = _mm_sqrt_ps(_sum4);
-
-        // and save the result
-        _mm_store_ps(result, _sq);
-        output(x, y) = result[0];
-
-        labbegin += 4;
-      }
-    }
-
-    TIMER_MAG_SSE.end();
-    return output;
   }
 
   vector<Image<PixGray<float>>> calculateGradient(Image<PixGray<float>> input, int const r)
@@ -572,14 +623,18 @@ namespace sse {
   Image<PixGray<float>> calculateRidge(vector<Image<PixGray<float>>> const &gradImg, int const r)
   {
     TIMER_RIDGE_SSE.begin();
-    
-    int w = gradImg[0].width();
-    int h = gradImg[0].height();
+
+    vector<Image<PixGray<float>, SafeAccess>> safe_gradImage = {gradImg[0], gradImg[1]};
+
+    int w = safe_gradImage[0].width();
+    int h = safe_gradImage[0].height();
 
     Image<PixGray<float>> ridgeImage(w,h);
 
     float dx[NUM_GRADIENT_DIRECTIONS];
     float dy[NUM_GRADIENT_DIRECTIONS];
+    float rdx[NUM_GRADIENT_DIRECTIONS];
+    float rdy[NUM_GRADIENT_DIRECTIONS];
 
     float const pi2 = 2.0f*M_PI;
     float const norm = 1/float(NUM_GRADIENT_DIRECTIONS);
@@ -590,6 +645,9 @@ namespace sse {
       float const idx = pi2*float(k)*norm;
       dx[k] = cos(idx);
       dy[k] = sin(idx);
+
+      rdx[k] = int(r*dx[k]);
+      rdy[k] = int(r*dy[k]);
     }
 
     for (int j = 0; j < h; j++)
@@ -600,30 +658,33 @@ namespace sse {
 
         for (int k = 0; k < NUM_GRADIENT_DIRECTIONS; k++)
         {
-          int i_p = std::min(float(w-2), i + r*dx[k]);
-          int j_p = std::min(float(h-2), j + r*dy[k]);
-          int i_m = std::max(0.0F,		 i - r*dx[k]);
-          int j_m = std::max(0.0F, 		 j - r*dy[k]);
+          int i_p = std::min(float(w-2), abs(i + rdx[k]));
+          int j_p = std::min(float(h-2), abs(j + rdy[k]));
+          int i_m = std::min(float(w-2), abs(i - rdx[k]));
+          int j_m = std::min(float(h-2), abs(j - rdy[k]));
 
           float rgeo = sqrt(std::max(0.0F, 
-                -(gradImg[0].at(i_m, j_m).val() * dx[k] + gradImg[1].at(i_m, j_m).val() * dy[k]) * 
-                (gradImg[0].at(i_p, j_p).val() * dx[k] + gradImg[1].at(i_p, j_p).val() * dy[k])));
+                -(safe_gradImage[0].at(i_m, j_m).val() * dx[k] +
+                  safe_gradImage[1].at(i_m, j_m).val() * dy[k]) * 
+
+                (safe_gradImage[0].at(i_p, j_p).val() * dx[k] +
+                 safe_gradImage[1].at(i_p, j_p).val() * dy[k])));
 
           float rarith = std::max(0.0F,
-              (gradImg[0].at(i_m, j_m).val() * dx[k] + gradImg[1].at(i_m, j_m).val() * dy[k]) - 
-              (gradImg[0].at(i_p, j_p).val() * dx[k] + gradImg[1].at(i_p, j_p).val() * dy[k])
+              (safe_gradImage[0].at(i_m, j_m).val() * dx[k] + safe_gradImage[1].at(i_m, j_m).val() * dy[k]) - 
+              (safe_gradImage[0].at(i_p, j_p).val() * dx[k] + safe_gradImage[1].at(i_p, j_p).val() * dy[k])
               );
 
           max = std::max(max, rgeo+rarith);
 
-          //float ridge = -gradImg[0].at(i_p, j_p).val()*gradImg[0].at(i_m, j_m).val() - gradImg[1].at(i_p, j_p).val()*gradImg[1].at(i_m, j_m).val();
+          //float ridge = -safe_gradImage[0].at(i_p, j_p).val()*safe_gradImage[0].at(i_m, j_m).val() - safe_gradImage[1].at(i_p, j_p).val()*safe_gradImage[1].at(i_m, j_m).val();
           //ridge = sqrt(std::max(0.0F, ridge));
 
-          //ridge += sqrt(pow(gradImg[0].at(i_p, j_p).val() - gradImg[0].at(i_p, j_p).val(), 2) + pow(gradImg[1].at(i_p, j_p).val() - gradImg[1].at(i_p, j_p).val(), 2))/2.0F;
+          //ridge += sqrt(pow(safe_gradImage[0].at(i_p, j_p).val() - safe_gradImage[0].at(i_p, j_p).val(), 2) + pow(safe_gradImage[1].at(i_p, j_p).val() - safe_gradImage[1].at(i_p, j_p).val(), 2))/2.0F;
 
           //max = std::max(max, ridge);
         }
-        ridgeImage(i,j) = PixGray<float>(max) - sqrt(pow(gradImg[0].at(i,j).val(), 2) + pow(gradImg[1].at(i,j).val(), 2));
+        ridgeImage(i,j) = PixGray<float>(max) - sqrt(pow(safe_gradImage[0].at(i,j).val(), 2) + pow(safe_gradImage[1].at(i,j).val(), 2));
       }
     }
     TIMER_RIDGE_SSE.end();
@@ -693,7 +754,7 @@ namespace slow {
     return Image<PixLAB<float>>(output);
   }
 
-  Image<PixLAB<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
+  Image<PixGray<float>> blurredVariance(Image<PixLAB<float>> const lab, int const r)
   {
     TIMER_BLUR_SLOW.begin();
 
@@ -742,27 +803,17 @@ namespace slow {
         output(x,y) = PixLAB<float>(r,g,b);
       }
     }
+   
+    // this used to be in magnitudeLAB()
+    Image<PixGray<float>> grayout(w, h);
+    for (int x = 0; x < w; x++)
+      for (int y = 0; y < h; y++)
+        grayout(x, y) = sqrt(pow(output(x, y).l(), 2)
+            + pow(output(x, y).a(), 2)
+            + pow(output(x, y).b(), 2));
 
     TIMER_BLUR_SLOW.end();
-    return output;
-  }
-
-  Image<PixGray<float>> magnitudeLAB(Image<PixLAB<float>> lab)
-  {
-    TIMER_MAG_SLOW.begin();
-
-    int w = lab.width();
-    int h = lab.height();
-    Image<PixGray<float>> output(w, h);
-
-    for (int x = 0; x < lab.width(); x++)
-      for (int y = 0; y < lab.height(); y++)
-        output(x, y) = sqrt(pow(lab(x, y).l(), 2)
-            + pow(lab(x, y).a(), 2)
-            + pow(lab(x, y).b(), 2));
-
-    TIMER_MAG_SLOW.end();
-    return output;
+    return grayout;
   }
 
   vector<Image<PixGray<float>>> calculateGradient(Image<PixGray<float>> gray, int const rad)
@@ -916,6 +967,9 @@ int main(int argc, const char** argv)
 
   Manager mgr(argc, argv);
   Parameter<string> imageName(ParameterDef<string>("image", "The image filename", ""), &mgr);
+  Parameter<int> nruns(ParameterDef<int>("runs", "The number of times to run the algorithm", 1), &mgr);
+  Parameter<int> r(ParameterDef<int>("radius", "The radius", 5), &mgr);
+  Parameter<bool> sseonly(ParameterDef<bool>("sse_only", "If true, only run the SSE code, otherwise run the slow code too", true), &mgr);
   shared_ptr<ImageSink> mySink(new ImageSink("MySink"));
 
   shared_ptr<ImageSource> mySource(new ImageSource);
@@ -924,7 +978,7 @@ int main(int argc, const char** argv)
   mgr.addSubComponent(mySink);
   mgr.launch();
 
-  int radius = 5;
+  int radius = r.getVal();
   while(mySource->ok())
   {
     Image<PixRGB<float>> input(mySource->in().convertTo<PixRGB<float>>());
@@ -932,44 +986,42 @@ int main(int argc, const char** argv)
     Image<PixLAB<float>> lab(input);
     Image<PixLABX<float>> labx(input);
 
-    //mySink->out(GenericImage(input), "Original RGB image");
-	
-    for (int i = 0; i < 100; i++)
-	{
-		///* Non-SSE */
-		{
-			NRT_INFO("Starting slow transform");
+    mySink->out(GenericImage(input), "Original RGB image");
 
-			Image<PixLAB<float>>          blurred(slow::blurredVarianceIntegralImage(lab, radius));
-			Image<PixGray<float>>         varImg(slow::magnitudeLAB(blurred));
-			vector<Image<PixGray<float>>> gradImgs = slow::calculateGradient(varImg, radius);
-			Image<PixGray<float>>         ridgeImg(slow::calculateRidge(gradImgs, radius));
+    for (int i = 0; i < nruns.getVal(); i++)
+    {
+      ///* Non-SSE */
+      if (!sseonly.getVal())
+      {
+        NRT_INFO("Starting slow transform");
 
-			//mySink->out(GenericImage(ridgeImg), "Slow (Non-SSE)");
-			NRT_INFO("Done with slow transform");
-		}
+        Image<PixGray<float>>         blurred(slow::blurredVarianceIntegralImage(lab, radius));
+        vector<Image<PixGray<float>>> gradImgs = slow::calculateGradient(blurred, radius);
+        Image<PixGray<float>>         ridgeImg(slow::calculateRidge(gradImgs, radius));
 
-		/* SSE */
-		{
-			NRT_INFO("Starting SSE transform");
+        mySink->out(GenericImage(ridgeImg), "Slow (Non-SSE)");
+        NRT_INFO("Done with slow transform");
+      }
 
-			Image<PixGray<float>>         blurred(sse::blurredVariance(labx, radius));
-			vector<Image<PixGray<float>>> gradImgs = sse::calculateGradient(blurred, radius);
-			Image<PixGray<float>>         ridgeImg(sse::calculateRidge(gradImgs, radius));
+      /* SSE */
+      {
+        NRT_INFO("Starting SSE transform");
 
-			//Image<PixRGB<byte>> displayImage(normalize<float>(ridgeImg, PixGray<float>(0.0), PixGray<float>(255.0)));
-			//mySink->out(GenericImage(displayImage), "Slow (Non-SSE)");
-			NRT_INFO("Done with SSE transform");
-		}
-	}
-	NRT_INFO("Timing info for 100 runs:");
+        Image<PixGray<float>>         blurred(sse::blurredVariance(labx, radius));
+        vector<Image<PixGray<float>>> gradImgs = sse::calculateGradient(blurred, radius);
+        Image<PixGray<float>>         ridgeImg(sse::calculateRidge(gradImgs, radius));
 
+        Image<PixRGB<byte>> displayImage(normalize<float>(ridgeImg, PixGray<float>(0.0), PixGray<float>(255.0)));
+        mySink->out(GenericImage(displayImage), "SSE (normalized)");
+        NRT_INFO("Done with SSE transform");
+      }
+    }
+
+    NRT_INFO("Timing info for " << nruns.getVal() << " runs:");
     NRT_INFO("Image Dims:\t" << input.dims());
+
     NRT_INFO("Slow Box Blur:\t" << TIMER_BLUR_SLOW.report());
     NRT_INFO("SSE Box Blur:\t" << TIMER_BLUR_SSE.report());
-
-    NRT_INFO("Slow Magnitude:\t" << TIMER_MAG_SLOW.report());
-    NRT_INFO("SSE Magnitude:\t" << TIMER_MAG_SSE.report());
 
     NRT_INFO("Slow Gradient:\t" << TIMER_GRAD_SLOW.report());
     NRT_INFO("SSE Gradient:\t" << TIMER_GRAD_SSE.report());
