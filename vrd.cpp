@@ -1,4 +1,7 @@
-#ifdef MAKE_SLOW_VERSION
+//#define VRD_MAKE_SLOW_VERSION 1
+#undef VRD_MAKE_SLOW_VERSION
+
+#ifdef VRD_MAKE_SLOW_VERSION
 #include <nrt/Eigen/Eigen.H>
 #include <nrt/Eigen/EigenConversions.H>
 #endif
@@ -163,7 +166,7 @@ namespace sse
   }
 }
 
-#ifdef MAKE_SLOW_VERSION
+#ifdef VRD_MAKE_SLOW_VERSION
 /********************
  * Non-SSE code
  ********************/
@@ -463,7 +466,7 @@ int main(int argc, const char** argv)
 
     for (int i = 0; i < nruns.getVal(); i++)
     {
-#ifdef MAKE_SLOW_VERSION
+#ifdef VRD_MAKE_SLOW_VERSION
       ///* Non-SSE */
       if (!sseonly.getVal())
       {

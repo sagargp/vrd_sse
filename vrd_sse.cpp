@@ -2,6 +2,7 @@
 #include <emmintrin.h> // sse3
 #include <xmmintrin.h> // sse
 #include <math.h>
+#include <stdio.h>
 
 #define NUM_GRADIENT_DIRECTIONS 8
 #define NUM_RIDGE_DIRECTIONS    NUM_GRADIENT_DIRECTIONS/2
@@ -15,488 +16,501 @@ inline float hadd_ps(__m128 *a)
   return data[0] + data[1] + data[2] + data[3];
 }
 
-void blurredVarianceSSE(float const * const inputImage, int32_t const w, int32_t const h, int32_t const r, float * outputImage)
+void vrd_sse(float const * const inputImage, int const w, int const h, int const r, float * outputImage)
 {
-    float * const integral  = new float[w*h*4];
-    float * const integral2 = new float[w*h*4];
+  float * const gradX = (float * const)malloc(sizeof(float) * w * h);
+  float * const gradY = (float * const)malloc(sizeof(float) * w * h);
 
-    // pre-compute some constants used below
-    int const norm_2r = 2*r;
-    int const norm_2r2 = 2*r*r;
-    int const norm_r2 = r*r;
-    int const norm_w1r = w+r-1;
-    int const norm_h1r = h+r-1;
-    int const w4 = 4*w;
-    int const xrigw = 4*(2*w-2-r);
-    int const yboth = w4*(2*h-2-r);
-    __m128 _norm = _mm_setzero_ps();
+  blurredVarianceSSE(inputImage, w, h, r, outputImage);
+  calculateGradientSSE(outputImage, w, h, r, gradX, gradY);
+  calculateRidgeSSE(gradX, gradY, w, h, r, outputImage);
 
-    // set the first row
-    for(int i=0; i<4; ++i)
-    {
-      integral[i]  = inputImage[i];
-      integral2[i] = inputImage[i];
-    }
+  free(gradX);
+  free(gradY);
+}
+
+void blurredVarianceSSE(float const * const inputImage, int const w, int const h, int const r, float * outputImage)
+{
+  float * const integral  = (float * const)malloc(sizeof(float) * w * h * 4);
+  float * const integral2 = (float * const)malloc(sizeof(float) * w * h * 4);
+
+  // pre-compute some constants used below
+  int const norm_2r = 2*r;
+  int const norm_2r2 = 2*r*r;
+  int const norm_r2 = r*r;
+  int const norm_w1r = w+r-1;
+  int const norm_h1r = h+r-1;
+  int const w4 = 4*w;
+  int const xrigw = 4*(2*w-2-r);
+  int const yboth = w4*(2*h-2-r);
+  __m128 _norm = _mm_setzero_ps();
+
+  // set the first row
+  for(int i=0; i<4; ++i)
+  {
+    integral[i]  = inputImage[i];
+    integral2[i] = inputImage[i];
+  }
+
+  for (int x = 1; x < w; x++)
+  {
+    __m128 _prev = _mm_load_ps( &integral[ (x-1)*4] );
+    __m128 _prev2 = _mm_load_ps( &integral2[ (x-1)*4] );
+    __m128 _curr = _mm_load_ps( &inputImage[ x*4] );
+
+    __m128 _resl = _mm_add_ps(_prev, _curr);
+    __m128 _resl2 = _mm_add_ps(_prev2, _mm_mul_ps(_curr, _curr));
+
+    _mm_store_ps((float*)&integral[x*4], _resl);
+    _mm_store_ps((float*)&integral2[x*4], _resl2);
+  }
+
+  // set the first column
+  for (int y = 1; y < h; y++)
+  { 
+    __m128 _prev = _mm_load_ps( &integral[ (y-1)*w*4] );
+    __m128 _prev2 = _mm_load_ps( &integral2[ (y-1)*w*4] );
+    __m128 _curr = _mm_load_ps( &inputImage[ y*w*4] );
+
+    __m128 _resl = _mm_add_ps(_prev, _curr);
+    __m128 _resl2 = _mm_add_ps(_prev2, _mm_mul_ps(_curr, _curr));
+
+    _mm_store_ps((float*)&integral[y*w4], _resl);
+    _mm_store_ps((float*)&integral2[y*w4], _resl2);
+  }
+
+  // compute the integral image
+  for (int y = 1; y < h; y++)
+  {
+    int const y1 = w4*(y-1); 
+    int const yw = y*w;
 
     for (int x = 1; x < w; x++)
     {
-      __m128 _prev = _mm_load_ps( &integral[ (x-1)*4] );
-      __m128 _prev2 = _mm_load_ps( &integral2[ (x-1)*4] );
-      __m128 _curr = _mm_load_ps( &inputImage[ x*4] );
+      int const x1 = 4*(x-1);
 
-      __m128 _resl = _mm_add_ps(_prev, _curr);
-      __m128 _resl2 = _mm_add_ps(_prev2, _mm_mul_ps(_curr, _curr));
+      __m128 _currn = _mm_load_ps(&inputImage[ x*4 + w4*y ]); //(x + y*w)*4 ]);
+      __m128 _currn2 = _mm_mul_ps(_currn, _currn); 
 
-      _mm_store_ps((float*)&integral[x*4], _resl);
-      _mm_store_ps((float*)&integral2[x*4], _resl2);
+      __m128 _lfint = _mm_load_ps(&integral[ x1 + w4*y ]); // ((x-1) + (y-0)*w)*4 ]);
+      __m128 _tpint = _mm_load_ps(&integral[ x*4 + y1 ]); // ((x-0) + (y-1)*w)*4 ]);
+      __m128 _tlint = _mm_load_ps(&integral[ x1 + y1 ]); //((x-1) + (y-1)*w)*4 ]);
+
+      __m128 _reslt = _mm_add_ps(_lfint, _tpint); 
+      _reslt = _mm_sub_ps(_reslt, _tlint); 
+      _reslt = _mm_add_ps(_reslt, _currn); 
+
+      _mm_store_ps((float*)&integral[(yw + x)*4], _reslt);
+
+      /* squared */
+      __m128 _lfint2 = _mm_load_ps(&integral2[ x1 + w4*y ]); // ((x-1) + (y-0)*w)*4 ]);
+      __m128 _tpint2 = _mm_load_ps(&integral2[ x*4 + y1 ]); // ((x-0) + (y-1)*w)*4 ]);
+      __m128 _tlint2 = _mm_load_ps(&integral2[ x1 + y1 ]); //((x-1) + (y-1)*w)*4 ]);
+
+      __m128 _reslt2 = _mm_add_ps(_lfint2, _tpint2); 
+      _reslt2 = _mm_sub_ps(_reslt2, _tlint2); 
+      _reslt2 = _mm_add_ps(_reslt2, _currn2); 
+
+      _mm_store_ps((float*)&integral2[(yw + x)*4], _reslt2);
     }
+  }
 
-    // set the first column
-    for (int y = 1; y < h; y++)
+  // compute the blur when y<r and x<r (top left corner) 
+  for (int y = 0; y < r;  y++)
+  {
+    int const ybot = w4*(y+r);
+    int const ytop = w4*abs(y-r);
+    float * outputrowptr = outputImage + y*w;
+
+    for (int x = 0; x < r; x++)
     {
-      __m128 _prev = _mm_load_ps( &integral[ (y-1)*w*4] );
-      __m128 _prev2 = _mm_load_ps( &integral2[ (y-1)*w*4] );
-      __m128 _curr = _mm_load_ps( &inputImage[ y*w*4] );
+      int const xrig = 4*(x+r);
+      int const xlef = 4*abs(x-r);
 
-      __m128 _resl = _mm_add_ps(_prev, _curr);
-      __m128 _resl2 = _mm_add_ps(_prev2, _mm_mul_ps(_curr, _curr));
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-      _mm_store_ps((float*)&integral[y*w4], _resl);
-      _mm_store_ps((float*)&integral2[y*w4], _resl2);
+      _norm = _mm_set1_ps( (x+r)*(y+r) );
+
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
+
+      // squared
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
+
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
+
+      // output = integral2 - integral^2
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+
+      *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+      outputrowptr++;
     }
+  }
 
-    // compute the integral image
-    for (int y = 1; y < h; y++)
+  // compute the blur when y<r but x>2r (top edge)
+  for (int y = 0; y < r; y++)
+  {
+    int const ybot = w4*(y+r);
+    int const ytop = w4*abs(y-r);
+    float * outputrowptr = outputImage + y*w;
+
+    for (int x = r; x < w-r; x++)
     {
-      int const y1 = w4*(y-1); 
-      int const yw = y*w;
+      int const xlef = 4*(x-r);
+      int const xrig = 4*(x+r);
 
-      for (int x = 1; x < w; x++)
-      {
-        int const x1 = 4*(x-1);
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-        __m128 _currn = _mm_load_ps(&inputImage[ x*4 + w4*y ]); //(x + y*w)*4 ]);
-        __m128 _currn2 = _mm_mul_ps(_currn, _currn); 
+      _norm = _mm_set1_ps( y * norm_2r + norm_2r2 );
 
-        __m128 _lfint = _mm_load_ps(&integral[ x1 + w4*y ]); // ((x-1) + (y-0)*w)*4 ]);
-        __m128 _tpint = _mm_load_ps(&integral[ x*4 + y1 ]); // ((x-0) + (y-1)*w)*4 ]);
-        __m128 _tlint = _mm_load_ps(&integral[ x1 + y1 ]); //((x-1) + (y-1)*w)*4 ]);
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
 
-        __m128 _reslt = _mm_add_ps(_lfint, _tpint); 
-        _reslt = _mm_sub_ps(_reslt, _tlint); 
-        _reslt = _mm_add_ps(_reslt, _currn); 
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
 
-        _mm_store_ps((float*)&integral[(yw + x)*4], _reslt);
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
 
-        /* squared */
-        __m128 _lfint2 = _mm_load_ps(&integral2[ x1 + w4*y ]); // ((x-1) + (y-0)*w)*4 ]);
-        __m128 _tpint2 = _mm_load_ps(&integral2[ x*4 + y1 ]); // ((x-0) + (y-1)*w)*4 ]);
-        __m128 _tlint2 = _mm_load_ps(&integral2[ x1 + y1 ]); //((x-1) + (y-1)*w)*4 ]);
+      // output = integral2 - integral^2
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
 
-        __m128 _reslt2 = _mm_add_ps(_lfint2, _tpint2); 
-        _reslt2 = _mm_sub_ps(_reslt2, _tlint2); 
-        _reslt2 = _mm_add_ps(_reslt2, _currn2); 
-
-        _mm_store_ps((float*)&integral2[(yw + x)*4], _reslt2);
-      }
+      *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+      outputrowptr++;
     }
+  }
 
-    // compute the blur when y<r and x<r (top left corner) 
-    for (int y = 0; y < r;  y++)
+  // compute the blur when y<r and x>(w-r) (top right corner) 
+  for (int y = 0; y < r; y++)
+  {
+    int const ybot = w4*(y+r);
+    int const ytop = w4*abs(y-r);
+    float * outputrowptr = outputImage + y*w;
+
+    for (int x = w-r; x < w; x++)
     {
-      int const ybot = w4*(y+r);
-      int const ytop = w4*abs(y-r);
-      float * outputrowptr = outputImage + y*w;
+      int const xlef = 4*(x-r);
+      int const xrig = xrigw - 4*w; 
 
-      for (int x = 0; x < r; x++)
-      {
-        int const xrig = 4*(x+r);
-        int const xlef = 4*abs(x-r);
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
+      _norm = _mm_set1_ps( (y+r)*(norm_w1r-x) );
 
-        _norm = _mm_set1_ps( (x+r)*(y+r) );
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
 
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
 
-        // squared
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
 
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
+      // output = integral2 - integral^2
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
 
-        // output = integral2 - integral^2
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-
-        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
-        outputrowptr++;
-      }
+      *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+      outputrowptr++;
     }
+  }
 
-    // compute the blur when y<r but x>2r (top edge)
-    for (int y = 0; y < r; y++)
+  // compute the blur when y>r and x<r (left edge)
+  for (int y = r; y < h-r; y++)
+  {
+    int const ytop = w4*(y-r);
+    int const ybot = w4*(y+r);
+    float * outputrowptr = outputImage + y*w;
+
+    for (int x = 0; x < r; x++)
     {
-      int const ybot = w4*(y+r);
-      int const ytop = w4*abs(y-r);
-      float * outputrowptr = outputImage + y*w;
+      int const xrig = 4*(x+r);
+      int const xlef = 4*abs(x-r);
 
-      for (int x = r; x < w-r; x++)
-      {
-        int const xlef = 4*(x-r);
-        int const xrig = 4*(x+r);
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
+      _norm = _mm_set1_ps( x*norm_2r + norm_2r2 );
 
-        _norm = _mm_set1_ps( y * norm_2r + norm_2r2 );
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
 
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
 
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
 
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
+      // output = integral2 - integral^2
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
 
-        // output = integral2 - integral^2
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-
-        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
-        outputrowptr++;
-      }
+      *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+      outputrowptr++;
     }
+  }
 
-    // compute the blur when y<r and x>(w-r) (top right corner) 
-    for (int y = 0; y < r; y++)
+  // compute the blur when y>(h-r) and x<r (bottom left corner)
+  for (int y = h-r; y < h; y++)
+  {
+    int const ytop = w4*(y-r);
+    int const ybot = yboth - y*w4;
+    float * outputrowptr = outputImage + y*w;
+
+    for (int x = 0; x < r; x++)
     {
-      int const ybot = w4*(y+r);
-      int const ytop = w4*abs(y-r);
-      float * outputrowptr = outputImage + y*w;
+      int const xrig = 4*(x+r);
+      int const xlef = 4*abs(x-r);
 
-      for (int x = w-r; x < w; x++)
-      {
-        int const xlef = 4*(x-r);
-        int const xrig = xrigw - 4*w; 
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
+      _norm = _mm_set1_ps( (norm_h1r-y)*(x+r) );
 
-        _norm = _mm_set1_ps( (y+r)*(norm_w1r-x) );
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
 
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
 
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
 
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
+      // output = integral2 - integral^2
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
 
-        // output = integral2 - integral^2
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-
-        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
-        outputrowptr++;
-      }
+      *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+      outputrowptr++;
     }
+  }
 
-    // compute the blur when y>r and x<r (left edge)
-    for (int y = r; y < h-r; y++)
+  // compute the blur when y>(h-r) and x>r (bottom edge)
+  for (int y = h-r; y < h; y++)
+  {
+    int const ytop = w4*(y-r);
+    int const ybot = yboth - y*w4; 
+    float * outputrowptr = outputImage + y*w;
+
+    for (int x = r; x < w-r; x++)
     {
-      int const ytop = w4*(y-r);
-      int const ybot = w4*(y+r);
-      float * outputrowptr = outputImage + y*w;
+      int const xlef = 4*(x-r);
+      int const xrig = 4*(x+r);
 
-      for (int x = 0; x < r; x++)
-      {
-        int const xrig = 4*(x+r);
-        int const xlef = 4*abs(x-r);
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
+      _norm = _mm_set1_ps( (norm_h1r-y)*norm_2r );
 
-        _norm = _mm_set1_ps( x*norm_2r + norm_2r2 );
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
 
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
 
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
 
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
 
-        // output = integral2 - integral^2
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+      // output = integral2 - integral^2
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
 
-        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
-        outputrowptr++;
-      }
+      *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+      outputrowptr++;
     }
+  }
 
-    // compute the blur when y>(h-r) and x<r (bottom left corner)
-    for (int y = h-r; y < h; y++)
+  // compute the blur when y>(h-r) and x>(w-r) (bottom right corner)
+  for (int y = h-r; y < h; y++)
+  {
+    int const ytop = w4*(y-r);
+    int const ybot = yboth - y*w4; 
+    float * outputrowptr = outputImage + y*w;
+
+    for (int x = w-r; x < w; x++)
     {
-      int const ytop = w4*(y-r);
-      int const ybot = yboth - y*w4;
-      float * outputrowptr = outputImage + y*w;
+      int const xlef = 4*(x-r);
+      int const xrig = xrigw - 4*x;
 
-      for (int x = 0; x < r; x++)
-      {
-        int const xrig = 4*(x+r);
-        int const xlef = 4*abs(x-r);
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
+      _norm = _mm_set1_ps( (norm_h1r-y)*(norm_w1r-x) ); 
 
-        _norm = _mm_set1_ps( (norm_h1r-y)*(x+r) );
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
 
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
 
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
 
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
+      // output = integral2 - integral^2
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
 
-        // output = integral2 - integral^2
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-
-        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
-        outputrowptr++;
-      }
+      *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+      outputrowptr++;
     }
+  }
 
-    // compute the blur when y>(h-r) and x>r (bottom edge)
-    for (int y = h-r; y < h; y++)
+  // compute the blur when y>r and x>(w-r) (right edge)    
+  for (int y = r; y < h-r; y++)
+  {
+    int const ytop = w4*(y-r);
+    int const ybot = w4*(y+r);
+    float * outputrowptr = outputImage + y*w;
+
+    for (int x = w-r; x < w; x++)
     {
-      int const ytop = w4*(y-r);
-      int const ybot = yboth - y*w4; 
-      float * outputrowptr = outputImage + y*w;
+      int const xlef = 4*(x-r);
+      int const xrig = xrigw - 4*x;
 
-      for (int x = r; x < w-r; x++)
-      {
-        int const xlef = 4*(x-r);
-        int const xrig = 4*(x+r);
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
+      _norm = _mm_set1_ps( norm_2r*(norm_w1r-x) ); 
 
-        _norm = _mm_set1_ps( (norm_h1r-y)*norm_2r );
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
 
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
 
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + yboth ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + yboth ] );
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
 
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
+      // output = integral2 - integral^2
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
 
-        // output = integral2 - integral^2
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-
-        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
-        outputrowptr++;
-      }
+      *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
+      outputrowptr++;
     }
+  }
 
-    // compute the blur when y>(h-r) and x>(w-r) (bottom right corner)
-    for (int y = h-r; y < h; y++)
+  // compute the blur on the rest of the image
+  _norm = _mm_set1_ps( 4*r*r ); 
+  for (int y = r; y < h-r; y++)
+  {
+    int const ytop = w4*(y-r);
+    int const ybot = w4*(y+r);
+
+    float * outputrowptr = outputImage + y*w + r; 
+
+    for (int x = r; x < w-r; x++)
     {
-      int const ytop = w4*(y-r);
-      int const ybot = yboth - y*w4; 
-      float * outputrowptr = outputImage + y*w;
+      int const xlef = 4*(x-r);
+      int const xrig = 4*(x+r);
 
-      for (int x = w-r; x < w; x++)
-      {
-        int const xlef = 4*(x-r);
-        int const xrig = xrigw - 4*x;
+      __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
+      __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
+      __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
+      __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
 
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
+      __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
+      _reslt = _mm_sub_ps(_reslt, _toprig);
+      _reslt = _mm_add_ps(_reslt, _toplef);
+      _reslt = _mm_div_ps(_reslt, _norm);
 
-        _norm = _mm_set1_ps( (norm_h1r-y)*(norm_w1r-x) ); 
+      //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
 
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
+      /* squared */
+      __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
+      __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
+      __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
+      __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
 
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
+      __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
+      _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
+      _reslt2 = _mm_add_ps(_reslt2, _toplef2);
+      _reslt2 = _mm_div_ps(_reslt2, _norm);
 
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
+      // output = integral2 - integral^2
 
-        // output = integral2 - integral^2
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
+      __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
+      _l2norm = _mm_mul_ps(_l2norm, _l2norm);
 
-        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
-        outputrowptr++;
-      }
+      *outputrowptr = sqrt(hadd_ps(&_l2norm));
+      outputrowptr++;
+      //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
     }
+  }
 
-    // compute the blur when y>r and x>(w-r) (right edge)    
-    for (int y = r; y < h-r; y++)
-    {
-      int const ytop = w4*(y-r);
-      int const ybot = w4*(y+r);
-      float * outputrowptr = outputImage + y*w;
-
-      for (int x = w-r; x < w; x++)
-      {
-        int const xlef = 4*(x-r);
-        int const xrig = xrigw - 4*x;
-
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
-
-        _norm = _mm_set1_ps( norm_2r*(norm_w1r-x) ); 
-
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
-
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
-
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
-
-        // output = integral2 - integral^2
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-
-        *outputrowptr = sqrt(sqrt(hadd_ps(&_l2norm)));
-        outputrowptr++;
-      }
-    }
-
-    // compute the blur on the rest of the image
-    _norm = _mm_set1_ps( 4*r*r ); 
-    for (int y = r; y < h-r; y++)
-    {
-      int const ytop = w4*(y-r);
-      int const ybot = w4*(y+r);
-
-      float * outputrowptr = outputImage + y*w + r; 
-
-      for (int x = r; x < w-r; x++)
-      {
-        int const xlef = 4*(x-r);
-        int const xrig = 4*(x+r);
-
-        __m128 _toplef = _mm_load_ps( &integral[ xlef + ytop ] );
-        __m128 _toprig = _mm_load_ps( &integral[ xrig + ytop ] );
-        __m128 _botrig = _mm_load_ps( &integral[ xrig + ybot ] );
-        __m128 _botlef = _mm_load_ps( &integral[ xlef + ybot ] );
-
-        __m128 _reslt = _mm_sub_ps(_botrig, _botlef);
-        _reslt = _mm_sub_ps(_reslt, _toprig);
-        _reslt = _mm_add_ps(_reslt, _toplef);
-        _reslt = _mm_div_ps(_reslt, _norm);
-
-        //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
-
-        /* squared */
-        __m128 _toplef2 = _mm_load_ps( &integral2[ xlef + ytop ] );
-        __m128 _toprig2 = _mm_load_ps( &integral2[ xrig + ytop ] );
-        __m128 _botrig2 = _mm_load_ps( &integral2[ xrig + ybot ] );
-        __m128 _botlef2 = _mm_load_ps( &integral2[ xlef + ybot ] );
-
-        __m128 _reslt2 = _mm_sub_ps(_botrig2, _botlef2);
-        _reslt2 = _mm_sub_ps(_reslt2, _toprig2);
-        _reslt2 = _mm_add_ps(_reslt2, _toplef2);
-        _reslt2 = _mm_div_ps(_reslt2, _norm);
-
-        // output = integral2 - integral^2
-
-        __m128 _l2norm = _mm_sub_ps(_reslt2, _mm_mul_ps(_reslt, _reslt));
-        _l2norm = _mm_mul_ps(_l2norm, _l2norm);
-
-        *outputrowptr = sqrt(hadd_ps(&_l2norm));
-        outputrowptr++;
-        //_mm_store_ps((float*)&output_ptr[4*(yw + x)], _reslt);
-      }
-    }
-
-
-    delete[] integral;
-    delete[] integral2;
+  free(integral);
+  free(integral2);
 }
 
 void calculateGradientSSE(float const * const inputImage, int const w, int const h, int const r, float * gradX, float * gradY)
@@ -617,7 +631,8 @@ void calculateRidgeSSE(float const * const gradX, float const * const gradY, int
 
         max = fmax(max, rgeo+rarith);
       }
-      ridgeImage[i+j*w] = max - sqrt(pow(gradX[i + j*w], 2) + pow(gradY[i + j*w], 2));
+      ridgeImage[i+j*w] = fabs((max - sqrt(pow(gradX[i + j*w], 2) + pow(gradY[i + j*w], 2)))-128);
     }
   }
+
 }
