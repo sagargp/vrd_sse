@@ -16,8 +16,8 @@ void mexFunction( int nlhs, mxArray *plhs[],
 {
   if(nrhs != 2)
     mexErrMsgTxt("Inputs must be [imagearray, radius]");
-  if(nlhs != 1)
-    mexErrMsgTxt("Only one output provided");
+  if(! (nlhs == 1 || nlhs == 3) )
+    mexErrMsgTxt("VRD provides either one output ([magnitude], or three outputs [magnitude, horizontal, vertical]");
 
   if(!(mxIsClass(prhs[0],"uint8") && mxGetNumberOfDimensions(prhs[0]) == 3))
   {
@@ -51,18 +51,25 @@ void mexFunction( int nlhs, mxArray *plhs[],
   }
 
   // Create the output array
-  mxArray *mxOutput = mxCreateNumericArray(2, &dims[0], mxSINGLE_CLASS, mxComplexity(0));
+  if(nlhs == 1)
+  {
+    mxArray *mxOutput = mxCreateNumericArray(2, &dims[0], mxSINGLE_CLASS, mxComplexity(0));
+    vrd_sse(img, dims[0], dims[1], radius, static_cast<float*>(mxGetData(mxOutput)));
+    plhs[0] = mxOutput;
+  }
+  else
+  {
+    mxArray *mxOutput = mxCreateNumericArray(2, &dims[0], mxSINGLE_CLASS, mxComplexity(0));
+    mxArray *mxGradV  = mxCreateNumericArray(2, &dims[0], mxSINGLE_CLASS, mxComplexity(0));
+    mxArray *mxGradH  = mxCreateNumericArray(2, &dims[0], mxSINGLE_CLASS, mxComplexity(0));
 
-  // Do the VRDing
-  vrd_sse(img, dims[0], dims[1], radius, static_cast<float*>(mxGetData(mxOutput)));
+    // Do the VRDing
+    vrd_sse(img, dims[0], dims[1], radius, static_cast<float*>(mxGetData(mxOutput)), static_cast<float*>(mxGetData(mxGradV)), static_cast<float*>(mxGetData(mxGradH)));
+    plhs[0] = mxOutput;
+    plhs[1] = mxGradV;
+    plhs[2] = mxGradH;
+  }
 
-
-  //int numlabels;
-  //SLIC SLICengine;
-  //SLICengine.DoSuperpixelSegmentation_ForGivenK(reinterpret_cast<uint32_t*>(img),
-  //    dims[0], dims[1], static_cast<int*>(mxGetData(mxOutput)), numlabels, numsuperpixels, 30);
-
-  plhs[0] = mxOutput;
 
   free(img);
 }
