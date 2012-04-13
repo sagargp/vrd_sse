@@ -18,15 +18,22 @@ inline float hadd_ps(__m128 *a)
 
 void vrd_sse(float const * const inputImage, int const w, int const h, int const r, float * outputImage)
 {
-  float * const gradX = (float * const)malloc(sizeof(float) * w * h);
-  float * const gradY = (float * const)malloc(sizeof(float) * w * h);
+  float * const vGradient = (float * const)malloc(sizeof(float) * w * h);
+  float * const hGradient = (float * const)malloc(sizeof(float) * w * h);
 
   blurredVarianceSSE(inputImage, w, h, r, outputImage);
-  calculateGradientSSE(outputImage, w, h, r, gradX, gradY);
-  calculateRidgeSSE(gradX, gradY, w, h, r, outputImage);
+  calculateGradientSSE(outputImage, w, h, r, vGradient, hGradient);
+  calculateRidgeSSE(vGradient, hGradient, w, h, r, outputImage);
 
-  free(gradX);
-  free(gradY);
+  free(vGradient);
+  free(hGradient);
+}
+
+void vrd_sse(float const * const inputImage, int const w, int const h, int const r, float * outputImage, float * vGradient, float * hGradient)
+{
+  blurredVarianceSSE(inputImage, w, h, r, outputImage);
+  calculateGradientSSE(outputImage, w, h, r, vGradient, hGradient);
+  calculateRidgeSSE(vGradient, hGradient, w, h, r, outputImage);
 }
 
 void blurredVarianceSSE(float const * const inputImage, int const w, int const h, int const r, float * outputImage)

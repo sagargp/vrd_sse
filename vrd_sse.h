@@ -11,6 +11,19 @@
  *  \param[out] outputImage a pointer to an allocated w*h chunk of floats where the output edge map will be written */
 void vrd_sse(float const * const inputImage, int const w, int const h, int const r, float * outputImage);
 
+//! Run the Variance Ridge Detector on an input image, and get the magnitude, x, and y gradients
+/*! This method simply chains together blurredVarianceSSE(), calculateGradientSSE(), and calculateRidgeSSE(), and is really the only
+ *  method that users should need.
+ *
+ *  \param[in] inputImage a w*h*4 float array containing the LABX image
+ *  \param[in] w The width of the input image
+ *  \param[in] h The height of the input image
+ *  \param[in] r The desired radius of the ridge detector (a smaller radius will detect finer edges). A good default is 3.
+ *  \param[out] outputImage a pointer to an allocated w*h chunk of floats where the output edge map will be written 
+ *  \param[out] vGradient a pointer to an allocated w*h chunk of floats where the output vertical gradient will be written (horizontal edges)
+ *  \param[out] hGradient a pointer to an allocated w*h chunk of floats where the output horizontal gradient will be written (vertical edges) */
+void vrd_sse(float const * const inputImage, int const w, int const h, int const r, float * outputImage, float * vGradient, float * hGradient);
+
 //! Calculate the blurred variance on an input image (Step 1 of VRD)
 /*! \param[in] inputImage A w*h*4 float array containing the LABX image
  *  \param[in] w The width of the input image
